@@ -933,6 +933,17 @@ a:hover {
     color: var(--text-primary);
 }
 
+.email-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.email-section-header .section-label {
+    margin-bottom: 0;
+}
+
 .folder-link-group {
     display: flex;
     gap: 0.5rem;

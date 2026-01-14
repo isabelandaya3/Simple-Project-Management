@@ -40,6 +40,15 @@ except ImportError:
     print("WARNING: pywin32 not installed. Email polling will be disabled.")
     print("Install with: pip install pywin32")
 
+# Optional: Windows toast notifications
+try:
+    from winotify import Notification, audio
+    HAS_WINOTIFY = True
+except ImportError:
+    HAS_WINOTIFY = False
+    print("WARNING: winotify not installed. System notifications will be disabled.")
+    print("Install with: pip install winotify")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -1236,6 +1245,12 @@ def init_db():
     except:
         pass
     
+    # Add email_entry_id column for opening original email
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN email_entry_id TEXT')
+    except:
+        pass
+    
     # Reviewer response history table for version tracking
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reviewer_response_history (
@@ -1286,8 +1301,25 @@ def init_db():
 # NOTIFICATION HELPERS
 # =============================================================================
 
+def show_windows_toast(title, message):
+    """Show a Windows toast notification in the system tray."""
+    if HAS_WINOTIFY:
+        try:
+            toast = Notification(
+                app_id="LEB Tracker",
+                title=title,
+                msg=message,
+                duration="short"
+            )
+            toast.set_audio(audio.Default, loop=False)
+            # Add action to open the app
+            toast.add_actions(label="Open App", launch="http://localhost:5000")
+            toast.show()
+        except Exception as e:
+            print(f"Toast notification error: {e}")
+
 def create_notification(notification_type, title, message, item_id=None, action_url=None, action_label=None):
-    """Create a new notification."""
+    """Create a new notification and show Windows toast."""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
@@ -1297,6 +1329,10 @@ def create_notification(notification_type, title, message, item_id=None, action_
     conn.commit()
     notification_id = cursor.lastrowid
     conn.close()
+    
+    # Also show Windows toast notification
+    show_windows_toast(title, message)
+    
     return notification_id
 
 # =============================================================================
@@ -1439,7 +1475,7 @@ def sanitize_folder_name(name):
     name = name.strip('- ')
     return name
 
-def create_item_folder(item_type, identifier, bucket):
+def create_item_folder(item_type, identifier, bucket, title=None):
     """Create a folder for the item and return the path."""
     base_path = Path(CONFIG['base_folder_path'])
     
@@ -1451,9 +1487,14 @@ def create_item_folder(item_type, identifier, bucket):
     # Create type subfolder
     type_folder = 'Submittals' if item_type == 'Submittal' else 'RFIs'
     
-    # Create item folder name
+    # Create item folder name - include title for easier distinction
     clean_id = sanitize_folder_name(identifier)
-    item_folder = f"{item_type} - {clean_id.replace(f'{item_type} #', '')}"
+    folder_id = clean_id.replace(f'{item_type} #', '')
+    if title:
+        clean_title = sanitize_folder_name(title)[:50]  # Limit title length
+        item_folder = f"{item_type} - {folder_id} - {clean_title}"
+    else:
+        item_folder = f"{item_type} - {folder_id}"
     
     # Full path
     full_path = base_path / bucket_folder / type_folder / item_folder
@@ -1642,7 +1683,7 @@ class EmailPoller:
                         ''', params)
                     else:
                         # Create new item
-                        folder_link = create_item_folder(item_type, identifier, bucket)
+                        folder_link = create_item_folder(item_type, identifier, bucket, title)
                         
                         # Extract date_received from email received time
                         if received_at:
@@ -1665,11 +1706,11 @@ class EmailPoller:
                             INSERT INTO item (type, bucket, identifier, title, source_subject, 
                                             created_at, last_email_at, due_date, priority, folder_link,
                                             date_received, initial_reviewer_due_date, qcr_due_date, 
-                                            is_contractor_window_insufficient)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                            is_contractor_window_insufficient, email_entry_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (item_type, bucket, identifier, title, subject,
                               received_at, received_at, due_date, priority, folder_link,
-                              date_received, initial_reviewer_due, qcr_due, is_insufficient))
+                              date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id))
                         item_id = cursor.lastrowid
                     
                     # Log the email
@@ -1764,6 +1805,13 @@ def send_reviewer_assignment_email(item_id):
     # Build email content
     subject = f"[LEB] {item['identifier']} – Assigned to You"
     
+    # Create clickable folder link
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4; text-decoration:underline;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
     html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
@@ -1774,6 +1822,16 @@ def send_reviewer_assignment_email(item_id):
     <p style="margin-top:0; font-size:13px; color:#666;">
         You have been assigned a new review task. Please review the details below.
     </p>
+
+    <!-- ACTION BUTTON - AT TOP -->
+    <div style="margin:20px 0; text-align:center;">
+        <a href="{respond_url}"
+           style="background:linear-gradient(135deg, #0078D4 0%, #106EBE 100%); color:white; padding:14px 32px; 
+                  font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
+                  box-shadow: 0 4px 6px rgba(0,120,212,0.3);">
+            📝 Open Response Form
+        </a>
+    </div>
 
     <!-- INFO TABLE -->
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
@@ -1826,19 +1884,11 @@ def send_reviewer_assignment_email(item_id):
 
     <!-- FILE PATH SECTION -->
     <div style="margin-top:18px;">
-        <div style="font-weight:bold; margin-bottom:4px;">Designated Folder:</div>
-        <div style="padding:8px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px;">
-            {item['folder_link'] or 'Not set'}
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Designated Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
         </div>
-    </div>
-
-    <!-- BUTTON -->
-    <div style="margin-top:22px; text-align:left;">
-        <a href="{respond_url}"
-           style="background:#0078D4; color:white; padding:10px 18px; 
-                  font-size:15px; text-decoration:none; border-radius:4px; display:inline-block;">
-            Open Response Form
-        </a>
+        <p style="font-size:11px; color:#888; margin-top:4px;">Click to open folder location</p>
     </div>
 
     <!-- INSTRUCTIONS -->
@@ -1983,6 +2033,13 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review"
         intro_text = "The Initial Reviewer has submitted their response. Please complete the QC review."
     
+    # Create clickable folder link for QCR email
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#27ae60; text-decoration:underline;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
     html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
@@ -1993,6 +2050,16 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     <p style="margin-top:0; font-size:13px; color:#666;">
         {intro_text}
     </p>
+
+    <!-- ACTION BUTTON - AT TOP -->
+    <div style="margin:20px 0; text-align:center;">
+        <a href="{respond_url}"
+           style="background:linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color:white; padding:14px 32px; 
+                  font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
+                  box-shadow: 0 4px 6px rgba(39,174,96,0.3);">
+            ✅ Open QC Review Form
+        </a>
+    </div>
 
     <!-- INFO TABLE -->
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
@@ -2076,19 +2143,11 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
     <!-- FILE PATH SECTION -->
     <div style="margin-top:18px;">
-        <div style="font-weight:bold; margin-bottom:4px;">Designated Folder:</div>
-        <div style="padding:8px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px;">
-            {item['folder_link'] or 'Not set'}
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Designated Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
         </div>
-    </div>
-
-    <!-- BUTTON -->
-    <div style="margin-top:22px; text-align:left;">
-        <a href="{respond_url}"
-           style="background:#27ae60; color:white; padding:10px 18px; 
-                  font-size:15px; text-decoration:none; border-radius:4px; display:inline-block;">
-            Open QC Review Form
-        </a>
+        <p style="font-size:11px; color:#888; margin-top:4px;">Click to open folder location</p>
     </div>
 
     <!-- INSTRUCTIONS -->
@@ -2909,7 +2968,8 @@ def api_create_item():
         return jsonify({'error': 'Identifier required'}), 400
     
     # Create folder
-    folder_link = create_item_folder(item_type, identifier, bucket)
+    title = data.get('title')
+    folder_link = create_item_folder(item_type, identifier, bucket, title)
     
     conn = get_db()
     cursor = conn.cursor()
@@ -3240,6 +3300,57 @@ def api_open_folder():
     except Exception as e:
         return jsonify({'error': f'Could not open folder: {e}'}), 500
 
+
+@app.route('/api/item/<int:item_id>/open-email', methods=['POST'])
+@login_required
+def api_open_original_email(item_id):
+    """Open the original email in Outlook for an item."""
+    if not HAS_WIN32COM:
+        return jsonify({'error': 'Outlook integration not available'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # First try to get email_entry_id from item table
+    cursor.execute('SELECT email_entry_id FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    
+    entry_id = None
+    if item and item['email_entry_id']:
+        entry_id = item['email_entry_id']
+    else:
+        # Fallback: get from email_log table
+        cursor.execute('''
+            SELECT entry_id FROM email_log 
+            WHERE item_id = ? 
+            ORDER BY received_at ASC 
+            LIMIT 1
+        ''', (item_id,))
+        email_log = cursor.fetchone()
+        if email_log:
+            entry_id = email_log['entry_id']
+    
+    conn.close()
+    
+    if not entry_id:
+        return jsonify({'error': 'No original email found for this item'}), 404
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            namespace = outlook.GetNamespace("MAPI")
+            
+            # Get the email by EntryID
+            mail_item = namespace.GetItemFromID(entry_id)
+            mail_item.Display()  # Opens the email in Outlook
+            
+            return jsonify({'success': True, 'message': 'Email opened in Outlook'})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        return jsonify({'error': f'Could not open email: {str(e)}'}), 500
+
 # =============================================================================
 # API ROUTES - COMMENTS
 # =============================================================================
@@ -3477,8 +3588,12 @@ def respond_reviewer_form():
             can_submit = False
     
     # Get current version info
-    current_version = item['reviewer_response_version'] or 1
-    next_version = current_version + 1 if is_resubmit else current_version
+    # First submission is v1, revisions are v2, v3, etc.
+    current_version = item['reviewer_response_version'] or 0
+    if is_resubmit:
+        next_version = current_version + 1
+    else:
+        next_version = 1  # First submission is always v1
     
     # Get previous response for pre-fill
     previous_response = None
@@ -3597,8 +3712,12 @@ def respond_reviewer_submit():
     selected_files = request.form.getlist('selected_files')
     
     # Calculate new version
+    # First submission is v1, revisions are v2, v3, etc.
     current_version = item['reviewer_response_version'] or 0
-    new_version = current_version + 1
+    new_version = current_version + 1 if current_version > 0 else 1
+    
+    # Track if this was a send-back scenario (before we reset qcr_action)
+    was_sent_back = qcr_action == 'Send Back'
     
     # Store current response in history before updating (if this is a resubmit)
     if is_resubmit and item['reviewer_response_at']:
@@ -3617,7 +3736,7 @@ def respond_reviewer_submit():
         ))
     
     # Determine new status based on whether QCR sent it back
-    if qcr_action == 'Send Back':
+    if was_sent_back:
         # Reset QCR state for new review cycle
         cursor.execute('''
             UPDATE item SET
@@ -3671,7 +3790,7 @@ def respond_reviewer_submit():
     # Send appropriate notifications
     if is_resubmit:
         # Send version update notification to QCR
-        if qcr_action == 'Send Back':
+        if was_sent_back:
             # Full new QCR assignment email for revision after send-back
             send_qcr_assignment_email(item_id, is_revision=True, version=new_version)
         else:

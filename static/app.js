@@ -744,6 +744,34 @@ function openFolder() {
 }
 
 /**
+ * Open original email in Outlook
+ */
+async function openOriginalEmail() {
+    if (!state.selectedItemId) {
+        alert('No item selected.');
+        return;
+    }
+    
+    try {
+        const result = await api(`/item/${state.selectedItemId}/open-email`, {
+            method: 'POST'
+        });
+        
+        if (result.success) {
+            console.log('Opened email in Outlook');
+        } else {
+            alert(result.error || 'Could not open email');
+        }
+    } catch (e) {
+        if (e.message.includes('No original email')) {
+            alert('No original email found for this item. This item may have been created manually.');
+        } else {
+            alert(`Could not open email: ${e.message}`);
+        }
+    }
+}
+
+/**
  * Open a folder path in Windows Explorer via backend API
  */
 async function openFilesFolder(folderPath) {
@@ -1970,6 +1998,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-save-item').addEventListener('click', saveItem);
     document.getElementById('btn-add-comment').addEventListener('click', addComment);
     document.getElementById('btn-open-folder').addEventListener('click', openFolder);
+    document.getElementById('btn-open-email').addEventListener('click', openOriginalEmail);
     
     // Reviewer validation - check when either reviewer dropdown changes
     document.getElementById('detail-initial-reviewer').addEventListener('change', () => {
