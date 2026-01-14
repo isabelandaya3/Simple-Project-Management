@@ -99,6 +99,9 @@ PRIORITY_MIN_DAYS = {
 # QCR requires at least this many work days before contractor due date
 QCR_DAYS_BEFORE_DUE = 1
 
+# QCR needs this many days to complete their review
+QCR_REVIEW_DAYS = 3
+
 # =============================================================================
 # WORKDAY HELPER FUNCTIONS
 # =============================================================================
@@ -211,17 +214,8 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     qcr_due_date = subtract_business_days(contractor_due_date, QCR_DAYS_BEFORE_DUE)
     
     # Calculate Initial Reviewer due date
-    # They should have time before QCR needs to review
-    # Available window for Initial Reviewer = total days - QCR days (at least 1)
-    available_for_reviewer = max(contractor_window_days - QCR_DAYS_BEFORE_DUE - 1, 1)
-    
-    # Initial Reviewer due date = date_received + available reviewer days
-    initial_reviewer_due_date = add_business_days(date_received, available_for_reviewer)
-    
-    # Ensure reviewer due date is at least 1 day before QCR due date
-    max_reviewer_due = subtract_business_days(qcr_due_date, 1)
-    if initial_reviewer_due_date > max_reviewer_due:
-        initial_reviewer_due_date = max_reviewer_due
+    # QCR needs QCR_REVIEW_DAYS (3) days to review, so reviewer must submit 3 days before QCR due
+    initial_reviewer_due_date = subtract_business_days(qcr_due_date, QCR_REVIEW_DAYS)
     
     # Ensure reviewer due date is not before date_received
     if initial_reviewer_due_date < date_received:
@@ -1832,12 +1826,12 @@ def send_reviewer_assignment_email(item_id):
     </p>
 
     <!-- ACTION BUTTON - AT TOP -->
-    <div style="margin:20px 0; text-align:center;">
+    <div style="margin:20px 0; text-align:left;">
         <a href="{respond_url}"
-           style="background:linear-gradient(135deg, #0078D4 0%, #106EBE 100%); color:white; padding:14px 32px; 
+           style="background:linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color:white; padding:14px 32px; 
                   font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
-                  box-shadow: 0 4px 6px rgba(0,120,212,0.3);">
-            📝 Open Response Form
+                  box-shadow: 0 4px 6px rgba(39,174,96,0.3);">
+            ✅ Open Response Form
         </a>
     </div>
 
@@ -2035,10 +2029,10 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     
     # Build subject and intro based on whether this is a revision
     if is_revision:
-        subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review (v{current_version})"
+        subject = f"[LEB] {item['identifier']} – Ready for Your Review (v{current_version})"
         intro_text = f"<strong style='color: #f59e0b;'>📝 Revision v{current_version}</strong> - The Initial Reviewer has submitted an updated response after your feedback. Please complete a new QC review."
     else:
-        subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review"
+        subject = f"[LEB] {item['identifier']} – Ready for Your Review"
         intro_text = "The Initial Reviewer has submitted their response. Please complete the QC review."
     
     # Create clickable folder link for QCR email
@@ -2052,7 +2046,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
     <!-- HEADER -->
     <h2 style="color:#444; margin-bottom:6px;">
-        [LEB] {item['type']} {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
+        [LEB] {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
     </h2>
 
     <p style="margin-top:0; font-size:13px; color:#666;">
@@ -2060,7 +2054,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     </p>
 
     <!-- ACTION BUTTON - AT TOP -->
-    <div style="margin:20px 0; text-align:center;">
+    <div style="margin:20px 0; text-align:left;">
         <a href="{respond_url}"
            style="background:linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color:white; padding:14px 32px; 
                   font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
