@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LEB Tracker - RFI & Submittal Management</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Login Page -->
+    <div id="login-page" class="login-page">
+        <div class="login-card">
+            <div class="login-logo">
+                <div class="logo-icon">📋</div>
+                <h1>LEB Tracker</h1>
+                <p>RFI & Submittal Management</p>
+            </div>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="login-email">Email</label>
+                    <input type="email" id="login-email" placeholder="Enter your email" required>
+                </div>
+                <div class="form-group">
+                    <label for="login-password">Password</label>
+                    <input type="password" id="login-password" placeholder="Enter your password" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+                <p id="login-error" class="error-message"></p>
+            </form>
+            <div class="login-footer">
+                <p>Default: admin@local / admin123</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div id="app" class="app hidden">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="app-logo">
+                    <span class="logo-emoji">📋</span>
+                    <span class="logo-text">LEB Tracker</span>
+                </div>
+                <button class="btn-collapse-sidebar" id="btn-collapse-sidebar" title="Collapse Sidebar">◀</button>
+            </div>
+
+            <!-- Project Section -->
+            <div class="sidebar-section">
+                <h3 class="sidebar-section-title">Project</h3>
+                <div class="project-card">
+                    <div class="project-name" id="project-name">LEB – Local Tracker</div>
+                    <div class="project-subtitle">RFI & Submittal Management</div>
+                </div>
+            </div>
+
+            <!-- Integrations Section -->
+            <div class="sidebar-section">
+                <h3 class="sidebar-section-title">Integrations</h3>
+                <button class="btn btn-outline btn-full btn-disabled" id="btn-connect-acc">
+                    <span class="btn-icon">🔗</span>
+                    Connect to ACC (Coming Soon)
+                </button>
+                <button class="btn btn-outline btn-full btn-disabled" id="btn-import-acc">
+                    <span class="btn-icon">📥</span>
+                    Import from ACC (Future)
+                </button>
+            </div>
+
+            <!-- Navigation Tabs -->
+            <div class="sidebar-section">
+                <h3 class="sidebar-section-title">Views</h3>
+                <nav class="nav-tabs">
+                    <button class="nav-tab" data-view="inbox">
+                        <span class="nav-tab-icon">📥</span>
+                        <span class="nav-tab-label">My Inbox</span>
+                        <span class="nav-tab-count" id="count-inbox">0</span>
+                    </button>
+                    <button class="nav-tab" data-view="workflow">
+                        <span class="nav-tab-icon">📧</span>
+                        <span class="nav-tab-label">Email & Responses</span>
+                    </button>
+                    <button class="nav-tab" data-view="notifications">
+                        <span class="nav-tab-icon">🔔</span>
+                        <span class="nav-tab-label">Notifications</span>
+                        <span class="nav-tab-count notification-badge" id="count-notifications">0</span>
+                    </button>
+                    <div class="nav-divider"></div>
+                    <button class="nav-tab active" data-bucket="ALL">
+                        <span class="nav-tab-icon">📁</span>
+                        <span class="nav-tab-label">All Items</span>
+                        <span class="nav-tab-count" id="count-all">0</span>
+                    </button>
+                    <button class="nav-tab" data-bucket="ACC_TURNER">
+                        <span class="nav-tab-icon">🏗️</span>
+                        <span class="nav-tab-label">ACC Turner</span>
+                        <span class="nav-tab-count" id="count-turner">0</span>
+                    </button>
+                    <button class="nav-tab" data-bucket="ACC_MORTENSON">
+                        <span class="nav-tab-icon">🏢</span>
+                        <span class="nav-tab-label">ACC Mortenson</span>
+                        <span class="nav-tab-count" id="count-mortenson">0</span>
+                    </button>
+                    <button class="nav-tab" data-bucket="ACC_FTI">
+                        <span class="nav-tab-icon">⚡</span>
+                        <span class="nav-tab-label">ACC FTI</span>
+                        <span class="nav-tab-count" id="count-fti">0</span>
+                    </button>
+                </nav>
+            </div>
+
+            <!-- Quick Filters -->
+            <div class="sidebar-section">
+                <h3 class="sidebar-section-title">Quick Filters</h3>
+                <div class="quick-filters">
+                    <button class="filter-chip" data-filter="type" data-value="">All Types</button>
+                    <button class="filter-chip" data-filter="type" data-value="RFI">RFIs Only</button>
+                    <button class="filter-chip" data-filter="type" data-value="Submittal">Submittals Only</button>
+                </div>
+            </div>
+
+            <!-- Polling Status -->
+            <div class="sidebar-section sidebar-footer">
+                <div class="polling-status">
+                    <span class="status-dot" id="polling-dot"></span>
+                    <span class="status-text" id="polling-status">Checking...</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="main-header">
+                <div class="header-left">
+                    <h1 class="page-title" id="page-title">All Items</h1>
+                    <p class="page-subtitle" id="page-subtitle">RFIs & Submittals</p>
+                </div>
+                <div class="header-stats">
+                    <div class="stat-card">
+                        <span class="stat-value" id="stat-open">0</span>
+                        <span class="stat-label">Open</span>
+                    </div>
+                    <div class="stat-card stat-warning">
+                        <span class="stat-value" id="stat-overdue">0</span>
+                        <span class="stat-label">Overdue</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value" id="stat-due-week">0</span>
+                        <span class="stat-label">Due This Week</span>
+                    </div>
+                </div>
+                <div class="header-right">
+                    <label class="toggle-label" id="show-closed-toggle">
+                        <input type="checkbox" id="show-closed-checkbox">
+                        <span>Show Closed</span>
+                    </label>
+                    <button class="btn btn-primary" id="btn-new-item">
+                        <span>+</span> New Item
+                    </button>
+                    <div class="user-menu">
+                        <button class="user-avatar" id="user-avatar">
+                            <span id="user-initials">A</span>
+                        </button>
+                        <div class="user-dropdown hidden" id="user-dropdown">
+                            <div class="dropdown-header">
+                                <span id="user-name">User</span>
+                                <span id="user-email" class="text-muted">user@local</span>
+                            </div>
+                            <hr>
+                            <button class="dropdown-item" id="btn-manage-users">
+                                <span>👥</span> Manage Users
+                            </button>
+                            <button class="dropdown-item" id="btn-settings">
+                                <span>⚙️</span> Settings
+                            </button>
+                            <hr>
+                            <button class="dropdown-item" id="btn-logout">
+                                <span>🚪</span> Sign Out
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Items Table -->
+            <div class="table-container" id="table-container">
+                <table class="items-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Identifier</th>
+                            <th>Title</th>
+                            <th>Date Recv'd</th>
+                            <th>Priority</th>
+                            <th>Contractor Due</th>
+                            <th>Reviewer Due</th>
+                            <th>QCR Due</th>
+                            <th>Status</th>
+                            <th>Initial Reviewer</th>
+                            <th>QCR</th>
+                        </tr>
+                    </thead>
+                    <tbody id="items-table-body">
+                        <!-- Items will be loaded here -->
+                    </tbody>
+                </table>
+                <div class="empty-state hidden" id="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <h3>No items found</h3>
+                    <p>Items from ACC emails will appear here automatically, or create one manually.</p>
+                </div>
+            </div>
+
+            <!-- Workflow View -->
+            <div class="workflow-container hidden" id="workflow-container">
+                <div class="workflow-header">
+                    <h2>📧 Email & Response Workflow</h2>
+                    <p>Monitor reviewer assignments and response status</p>
+                </div>
+                <table class="workflow-table">
+                    <thead>
+                        <tr>
+                            <th>Item</th>
+                            <th>Initial Reviewer</th>
+                            <th>Reviewer Response</th>
+                            <th>QCR</th>
+                            <th>QC Decision</th>
+                            <th>Final Response</th>
+                            <th>Folder</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workflow-table-body">
+                        <!-- Workflow items will be loaded here -->
+                    </tbody>
+                </table>
+                <div class="empty-state hidden" id="workflow-empty-state">
+                    <div class="empty-icon">📧</div>
+                    <h3>No workflow items</h3>
+                    <p>Items with assigned reviewers will appear here.</p>
+                </div>
+            </div>
+
+            <!-- Notifications View -->
+            <div class="notifications-container hidden" id="notifications-container">
+                <div class="notifications-header">
+                    <h2>🔔 Notifications</h2>
+                    <p>System updates and action items</p>
+                    <div class="notifications-actions">
+                        <button class="btn btn-secondary btn-sm" id="btn-mark-all-read">Mark All Read</button>
+                    </div>
+                </div>
+                <div class="notifications-list" id="notifications-list">
+                    <!-- Notifications will be loaded here -->
+                </div>
+                <div class="empty-state hidden" id="notifications-empty-state">
+                    <div class="empty-icon">🔔</div>
+                    <h3>No notifications</h3>
+                    <p>You're all caught up! Notifications will appear here when there are updates.</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Detail Drawer -->
+        <div class="drawer-overlay hidden" id="drawer-overlay"></div>
+        <aside class="detail-drawer hidden" id="detail-drawer">
+            <div class="drawer-header">
+                <h2 id="drawer-title">Item Details</h2>
+                <button class="btn-close" id="btn-close-drawer">&times;</button>
+            </div>
+            <div class="drawer-content">
+                <!-- Warning Banner for Insufficient Window -->
+                <div class="warning-banner hidden" id="insufficient-window-warning">
+                    <span class="warning-icon">⚠️</span>
+                    <span id="warning-text">Contractor provided insufficient review window</span>
+                </div>
+
+                <!-- Item Info -->
+                <div class="drawer-section">
+                    <div class="info-row">
+                        <span class="info-label">Type</span>
+                        <span class="chip" id="detail-type">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Bucket</span>
+                        <span id="detail-bucket">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Identifier</span>
+                        <span id="detail-identifier">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Date Received</span>
+                        <span id="detail-date-received">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Created</span>
+                        <span id="detail-created">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Last Email</span>
+                        <span id="detail-last-email">-</span>
+                    </div>
+                </div>
+
+                <!-- Original Subject -->
+                <div class="drawer-section">
+                    <label class="section-label">Original Subject</label>
+                    <p class="text-muted" id="detail-subject">-</p>
+                </div>
+
+                <!-- Editable Fields -->
+                <div class="drawer-section">
+                    <div class="form-group">
+                        <label for="detail-title-input">Title</label>
+                        <input type="text" id="detail-title-input" placeholder="Enter title">
+                    </div>
+                    
+                    <!-- Due Dates Section -->
+                    <div class="due-dates-section">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="detail-due-date">Contractor Due Date</label>
+                                <input type="date" id="detail-due-date">
+                            </div>
+                            <div class="form-group">
+                                <label for="detail-priority">Priority</label>
+                                <select id="detail-priority">
+                                    <option value="">Not Set</option>
+                                    <option value="High">High</option>
+                                    <option value="Medium">Medium</option>
+                                    <option value="Low">Low</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row calculated-dates">
+                            <div class="form-group">
+                                <label for="detail-initial-reviewer-due">Initial Reviewer Due</label>
+                                <input type="date" id="detail-initial-reviewer-due" class="calculated-date-input">
+                            </div>
+                            <div class="form-group">
+                                <label for="detail-qcr-due">QCR Due</label>
+                                <input type="date" id="detail-qcr-due" class="calculated-date-input">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="detail-status">Status</label>
+                        <select id="detail-status">
+                            <option value="Unassigned">Unassigned</option>
+                            <option value="Assigned">Assigned to Initial Reviewer</option>
+                            <option value="In Review">Under Review</option>
+                            <option value="In QC">Under QC</option>
+                            <option value="Ready for Response">Ready for Response</option>
+                            <option value="Closed">Closed</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Two-Level Review Assignment -->
+                    <div class="reviewer-section">
+                        <div class="form-group">
+                            <label for="detail-initial-reviewer">Initial Reviewer</label>
+                            <select id="detail-initial-reviewer">
+                                <option value="">Not Assigned</option>
+                                <!-- Users will be loaded here -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="detail-qcr">Quality Control Reviewer (QCR)</label>
+                            <select id="detail-qcr">
+                                <option value="">Not Assigned</option>
+                                <!-- Users will be loaded here -->
+                            </select>
+                        </div>
+                        <p class="reviewer-error hidden" id="reviewer-error">⚠️ Initial Reviewer and QCR must be different users</p>
+                        
+                        <!-- Email Workflow Actions -->
+                        <div class="workflow-actions" id="workflow-actions">
+                            <button class="btn btn-success" id="btn-send-to-reviewer">
+                                📧 Send to Reviewer
+                            </button>
+                            <div class="workflow-status hidden" id="workflow-status-info">
+                                <p id="workflow-status-text"></p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                </div>
+
+                <!-- Folder Link -->
+                <div class="drawer-section">
+                    <label class="section-label">Files Folder</label>
+                    <div class="folder-link-group">
+                        <input type="text" id="detail-folder" placeholder="Path to folder" readonly>
+                        <button class="btn btn-outline btn-sm" id="btn-open-folder">
+                            📂 Open
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Notes -->
+                <div class="drawer-section">
+                    <label class="section-label">Notes</label>
+                    <textarea id="detail-notes" rows="3" placeholder="Add notes..."></textarea>
+                </div>
+
+                <!-- Save Button -->
+                <div class="drawer-section">
+                    <button class="btn btn-primary btn-full" id="btn-save-item">Save Changes</button>
+                </div>
+
+                <!-- Response Section -->
+                <div class="drawer-section response-section">
+                    <label class="section-label">Reviewer Response</label>
+                    <div class="form-group">
+                        <label for="detail-response-category">Response Category</label>
+                        <select id="detail-response-category">
+                            <option value="">-- Select --</option>
+                            <option value="Approved">Approved</option>
+                            <option value="Approved as Noted">Approved as Noted</option>
+                            <option value="Revise and Resubmit">Revise and Resubmit</option>
+                            <option value="Rejected">Rejected</option>
+                            <option value="For Information Only">For Information Only</option>
+                            <option value="See Attached">See Attached</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="detail-response-text">Response Notes</label>
+                        <textarea id="detail-response-text" rows="3" placeholder="Enter response details and file names..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Response Files</label>
+                        <div id="file-list" class="file-checkbox-list">
+                            <p class="text-muted">No folder linked. Set a folder path above first.</p>
+                        </div>
+                    </div>
+                    <button class="btn btn-outline btn-full" id="btn-save-response">💾 Save Response</button>
+                </div>
+
+                <!-- Closeout Actions -->
+                <div class="drawer-section closeout-section">
+                    <button class="btn btn-success btn-full" id="btn-close-item">✅ Close Out Item</button>
+                    <button class="btn btn-warning btn-full hidden" id="btn-reopen-item">🔄 Undo Closeout (Admin)</button>
+                    <p id="closed-at-info" class="text-muted text-center hidden"></p>
+                </div>
+
+                <!-- Comments -->
+                <div class="drawer-section">
+                    <label class="section-label">Comments</label>
+                    <div id="comments-list" class="comments-list">
+                        <!-- Comments will be loaded here -->
+                    </div>
+                    <div class="add-comment">
+                        <textarea id="new-comment" rows="2" placeholder="Add a comment..."></textarea>
+                        <button class="btn btn-outline btn-sm" id="btn-add-comment">Add Comment</button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- New Item Modal -->
+    <div class="modal-overlay hidden" id="new-item-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Create New Item</h2>
+                <button class="btn-close" id="btn-close-new-item">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="new-item-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="new-type">Type *</label>
+                            <select id="new-type" required>
+                                <option value="Submittal">Submittal</option>
+                                <option value="RFI">RFI</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="new-bucket">Bucket</label>
+                            <select id="new-bucket">
+                                <option value="ALL">General</option>
+                                <option value="ACC_TURNER">ACC Turner</option>
+                                <option value="ACC_MORTENSON">ACC Mortenson</option>
+                                <option value="ACC_FTI">ACC FTI</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-identifier">Identifier *</label>
+                        <input type="text" id="new-identifier" placeholder="e.g., Submittal #13 34 19-2" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-title">Title</label>
+                        <input type="text" id="new-title" placeholder="Enter a title">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="new-due-date">Due Date</label>
+                            <input type="date" id="new-due-date">
+                        </div>
+                        <div class="form-group">
+                            <label for="new-priority">Priority</label>
+                            <select id="new-priority">
+                                <option value="">Not Set</option>
+                                <option value="High">High</option>
+                                <option value="Medium">Medium</option>
+                                <option value="Low">Low</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-full">Create Item</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ACC Modal (Placeholder) -->
+    <div class="modal-overlay hidden" id="acc-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Autodesk Construction Cloud Integration</h2>
+                <button class="btn-close" id="btn-close-acc">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="acc-placeholder">
+                    <div class="acc-icon">🔗</div>
+                    <h3>Coming Soon</h3>
+                    <p>In a future version, this will connect directly to Autodesk Construction Cloud via API to import RFIs and Submittals.</p>
+                    <p class="text-muted">For now, items are imported automatically through Outlook email monitoring.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manage Users Modal -->
+    <div class="modal-overlay hidden" id="users-modal">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h2>Manage Users</h2>
+                <button class="btn-close" id="btn-close-users">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="users-list" id="users-list">
+                    <!-- Users will be loaded here -->
+                </div>
+                <hr>
+                <h3>Add New User</h3>
+                <form id="new-user-form">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="new-user-email">Email *</label>
+                            <div class="autocomplete-wrapper">
+                                <input type="email" id="new-user-email" required autocomplete="off" placeholder="Start typing to search Outlook...">
+                                <div class="autocomplete-dropdown hidden" id="email-autocomplete"></div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="new-user-name">Display Name</label>
+                            <input type="text" id="new-user-name" placeholder="Optional - defaults to email">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="new-user-password">Password</label>
+                            <input type="password" id="new-user-password" placeholder="Optional - for login access">
+                            <small class="form-hint">Leave blank for team members who don't need to log in</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="new-user-role">Role</label>
+                            <select id="new-user-role">
+                                <option value="user">Team Member</option>
+                                <option value="admin">Admin</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Add Team Member</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay hidden" id="settings-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Settings</h2>
+                <button class="btn-close" id="btn-close-settings">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="settings-form">
+                    <div class="form-group">
+                        <label for="setting-project-name">Project Name</label>
+                        <input type="text" id="setting-project-name">
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-base-folder">Base Folder Path (Project Files Root)</label>
+                        <input type="text" id="setting-base-folder" placeholder="e.g., \\server\share\project">
+                        <small class="form-hint">All RFI and Submittal folders will be created here. Subfolders by contractor and type are auto-generated.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-outlook-folder">Outlook Folder</label>
+                        <input type="text" id="setting-outlook-folder" placeholder="Inbox or folder name">
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-poll-interval">Poll Interval (minutes)</label>
+                        <input type="number" id="setting-poll-interval" min="1" max="60">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-full">Save Settings</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

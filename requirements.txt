@@ -1,0 +1,18 @@
+# LEB Tracker - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+flask>=2.3.0
+
+# Password hashing
+bcrypt>=4.0.0
+
+# Date parsing (optional but recommended)
+python-dateutil>=2.8.0
+
+# Outlook integration (Windows only)
+pywin32>=306
+
+# Note: pywin32 is only needed on Windows for Outlook integration.
+# If you're developing on another platform, you can comment it out,
+# but the email polling feature will be disabled.

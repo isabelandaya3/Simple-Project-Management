@@ -1,0 +1,2061 @@
+/**
+ * LEB Tracker - Frontend Application
+ * Vanilla JavaScript for managing RFIs and Submittals
+ */
+
+// =============================================================================
+// STATE
+// =============================================================================
+
+const state = {
+    user: null,
+    items: [],
+    users: [],
+    stats: {},
+    currentBucket: 'ALL',
+    currentTypeFilter: '',
+    currentView: 'items', // 'items', 'inbox', or 'workflow'
+    showClosed: false,
+    selectedItemId: null,
+    workflowItems: []
+};
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+/**
+ * Make an API request
+ */
+async function api(endpoint, options = {}) {
+    const defaultOptions = {
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        credentials: 'include'
+    };
+    
+    const response = await fetch(`/api${endpoint}`, {
+        ...defaultOptions,
+        ...options
+    });
+    
+    if (response.status === 401) {
+        // Unauthorized - show login
+        showLogin();
+        throw new Error('Authentication required');
+    }
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+        throw new Error(data.error || 'API request failed');
+    }
+    
+    return data;
+}
+
+/**
+ * Format a date string for display
+ */
+function formatDate(dateStr) {
+    if (!dateStr) return '-';
+    
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return dateStr;
+    
+    return date.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+    });
+}
+
+/**
+ * Format a datetime string for display
+ */
+function formatDateTime(dateStr) {
+    if (!dateStr) return '-';
+    
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return dateStr;
+    
+    return date.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+    });
+}
+
+/**
+ * Get initials from a name
+ */
+function getInitials(name) {
+    if (!name) return '?';
+    return name.split(' ')
+        .map(part => part[0])
+        .join('')
+        .toUpperCase()
+        .slice(0, 2);
+}
+
+/**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Check if a date is overdue
+ */
+function isOverdue(dateStr) {
+    if (!dateStr) return false;
+    const dueDate = new Date(dateStr);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return dueDate < today;
+}
+
+/**
+ * Get bucket display name
+ */
+function getBucketName(bucket) {
+    const names = {
+        'ALL': 'General',
+        'ACC_TURNER': 'ACC Turner',
+        'ACC_MORTENSON': 'ACC Mortenson',
+        'ACC_FTI': 'ACC FTI'
+    };
+    return names[bucket] || bucket;
+}
+
+// =============================================================================
+// UI HELPERS
+// =============================================================================
+
+/**
+ * Show an element
+ */
+function show(element) {
+    if (typeof element === 'string') {
+        element = document.getElementById(element);
+    }
+    if (element) {
+        element.classList.remove('hidden');
+    }
+}
+
+/**
+ * Hide an element
+ */
+function hide(element) {
+    if (typeof element === 'string') {
+        element = document.getElementById(element);
+    }
+    if (element) {
+        element.classList.add('hidden');
+    }
+}
+
+/**
+ * Toggle an element
+ */
+function toggle(element) {
+    if (typeof element === 'string') {
+        element = document.getElementById(element);
+    }
+    if (element) {
+        element.classList.toggle('hidden');
+    }
+}
+
+// =============================================================================
+// AUTHENTICATION
+// =============================================================================
+
+/**
+ * Check if user is logged in
+ */
+async function checkAuth() {
+    try {
+        state.user = await api('/auth/me');
+        showApp();
+        await loadInitialData();
+    } catch (e) {
+        showLogin();
+    }
+}
+
+/**
+ * Show login page
+ */
+function showLogin() {
+    hide('app');
+    show('login-page');
+    state.user = null;
+}
+
+/**
+ * Show main app
+ */
+function showApp() {
+    hide('login-page');
+    show('app');
+    
+    // Update user info
+    if (state.user) {
+        document.getElementById('user-initials').textContent = getInitials(state.user.display_name);
+        document.getElementById('user-name').textContent = state.user.display_name;
+        document.getElementById('user-email').textContent = state.user.email;
+        
+        // Show/hide admin features
+        const manageUsersBtn = document.getElementById('btn-manage-users');
+        if (state.user.role !== 'admin') {
+            manageUsersBtn.style.display = 'none';
+        } else {
+            manageUsersBtn.style.display = 'flex';
+        }
+    }
+    
+    // Load notification count
+    updateNotificationCount();
+}
+
+/**
+ * Handle login form submission
+ */
+async function handleLogin(e) {
+    e.preventDefault();
+    
+    const email = document.getElementById('login-email').value;
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+    
+    try {
+        errorEl.textContent = '';
+        state.user = await api('/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ email, password })
+        });
+        showApp();
+        await loadInitialData();
+    } catch (e) {
+        errorEl.textContent = e.message || 'Login failed';
+    }
+}
+
+/**
+ * Handle logout
+ */
+async function handleLogout() {
+    try {
+        await api('/auth/logout', { method: 'POST' });
+    } catch (e) {
+        // Ignore errors
+    }
+    showLogin();
+}
+
+/**
+ * Toggle sidebar collapsed state
+ */
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const btn = document.getElementById('btn-collapse-sidebar');
+    sidebar.classList.toggle('collapsed');
+    
+    if (sidebar.classList.contains('collapsed')) {
+        btn.textContent = '▶';
+        btn.title = 'Expand Sidebar';
+    } else {
+        btn.textContent = '◀';
+        btn.title = 'Collapse Sidebar';
+    }
+}
+
+// =============================================================================
+// DATA LOADING
+// =============================================================================
+
+/**
+ * Load initial data
+ */
+async function loadInitialData() {
+    await Promise.all([
+        loadItems(),
+        loadUsers(),
+        loadStats(),
+        loadPollingStatus()
+    ]);
+}
+
+/**
+ * Load items list
+ */
+async function loadItems() {
+    try {
+        let endpoint = '/items?';
+        
+        if (state.currentBucket !== 'ALL') {
+            endpoint += `bucket=${state.currentBucket}&`;
+        }
+        
+        if (state.currentTypeFilter) {
+            endpoint += `type=${state.currentTypeFilter}&`;
+        }
+        
+        if (state.showClosed) {
+            endpoint += `show_closed=1&`;
+        }
+        
+        state.items = await api(endpoint);
+        renderItems();
+    } catch (e) {
+        console.error('Failed to load items:', e);
+    }
+}
+
+/**
+ * Load users list
+ */
+async function loadUsers() {
+    try {
+        state.users = await api('/users');
+        updateAssignedDropdown();
+    } catch (e) {
+        console.error('Failed to load users:', e);
+    }
+}
+
+/**
+ * Load stats
+ */
+async function loadStats() {
+    try {
+        state.stats = await api('/stats');
+        updateStats();
+        updateTabCounts();
+    } catch (e) {
+        console.error('Failed to load stats:', e);
+    }
+}
+
+/**
+ * Load polling status
+ */
+async function loadPollingStatus() {
+    try {
+        const status = await api('/poll-status');
+        updatePollingStatus(status);
+    } catch (e) {
+        console.error('Failed to load polling status:', e);
+    }
+}
+
+// =============================================================================
+// RENDERING
+// =============================================================================
+
+/**
+ * Get due date status class for color coding
+ */
+function getDueDateClass(status) {
+    if (!status) return '';
+    if (status === 'red') return 'due-date-red';
+    if (status === 'yellow') return 'due-date-yellow';
+    if (status === 'green') return 'due-date-green';
+    return '';
+}
+
+/**
+ * Render items table
+ */
+function renderItems() {
+    const tbody = document.getElementById('items-table-body');
+    const emptyState = document.getElementById('empty-state');
+    
+    if (state.items.length === 0) {
+        tbody.innerHTML = '';
+        show(emptyState);
+        return;
+    }
+    
+    hide(emptyState);
+    
+    tbody.innerHTML = state.items.map(item => {
+        const typeClass = item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal';
+        const priorityClass = item.priority ? `chip-${item.priority.toLowerCase()}` : '';
+        const closedClass = item.closed_at ? 'closed' : '';
+        const insufficientClass = item.is_contractor_window_insufficient ? 'insufficient-warning' : '';
+        
+        // Check if item is unread by current user
+        const readBy = item.read_by ? item.read_by.split(',').map(id => parseInt(id)) : [];
+        const isUnread = state.user && !readBy.includes(state.user.id);
+        const unreadDot = isUnread ? '<span class="unread-dot"></span>' : '';
+        
+        // Warning icon for insufficient window
+        const warningIcon = item.is_contractor_window_insufficient ? '<span class="warning-icon-small" title="Insufficient contractor window">⚠️</span>' : '';
+        
+        return `
+            <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass}">
+                <td>${unreadDot}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
+                <td>${warningIcon}${escapeHtml(item.identifier)}</td>
+                <td>${escapeHtml(item.title) || '<span class="text-muted">No title</span>'}</td>
+                <td>${formatDate(item.date_received)}</td>
+                <td>${item.priority ? `<span class="chip ${priorityClass}">${escapeHtml(item.priority)}</span>` : '-'}</td>
+                <td>${formatDate(item.due_date)}</td>
+                <td>${formatDate(item.initial_reviewer_due_date)}</td>
+                <td>${formatDate(item.qcr_due_date)}</td>
+                <td><span class="chip chip-status">${escapeHtml(item.status)}</span></td>
+                <td>${escapeHtml(item.initial_reviewer_name) || '<span class="text-muted">-</span>'}</td>
+                <td>${escapeHtml(item.qcr_name) || '<span class="text-muted">-</span>'}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+/**
+ * Update stats display
+ */
+function updateStats() {
+    document.getElementById('stat-open').textContent = state.stats.open_items || 0;
+    document.getElementById('stat-overdue').textContent = state.stats.overdue_items || 0;
+    document.getElementById('stat-due-week').textContent = state.stats.due_this_week || 0;
+}
+
+/**
+ * Update tab counts
+ */
+function updateTabCounts() {
+    const byBucket = state.stats.by_bucket || {};
+    
+    // Calculate ALL count (sum of all items)
+    const allCount = state.stats.total_items || 0;
+    
+    document.getElementById('count-all').textContent = allCount;
+    document.getElementById('count-turner').textContent = byBucket.ACC_TURNER || 0;
+    document.getElementById('count-mortenson').textContent = byBucket.ACC_MORTENSON || 0;
+    document.getElementById('count-fti').textContent = byBucket.ACC_FTI || 0;
+    
+    // Update inbox count
+    const inboxCount = state.stats.inbox_count || 0;
+    document.getElementById('count-inbox').textContent = inboxCount;
+}
+
+/**
+ * Update polling status display
+ */
+function updatePollingStatus(status) {
+    const dot = document.getElementById('polling-dot');
+    const text = document.getElementById('polling-status');
+    
+    if (!status.outlook_available) {
+        dot.className = 'status-dot error';
+        text.textContent = 'Outlook not available';
+    } else if (status.running) {
+        dot.className = 'status-dot active';
+        if (status.last_poll) {
+            const lastPoll = new Date(status.last_poll);
+            text.textContent = `Last poll: ${lastPoll.toLocaleTimeString()}`;
+        } else {
+            text.textContent = 'Email polling active';
+        }
+    } else {
+        dot.className = 'status-dot';
+        text.textContent = 'Polling inactive';
+    }
+}
+
+/**
+ * Update all reviewer dropdowns
+ */
+function updateAssignedDropdown() {
+    const userOptions = '<option value="">Not Assigned</option>' +
+        state.users.map(user => 
+            `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`
+        ).join('');
+    
+    document.getElementById('detail-initial-reviewer').innerHTML = userOptions;
+    document.getElementById('detail-qcr').innerHTML = userOptions;
+}
+
+// =============================================================================
+// DETAIL DRAWER
+// =============================================================================
+
+/**
+ * Open detail drawer for an item
+ */
+async function openDetailDrawer(itemId) {
+    state.selectedItemId = itemId;
+    
+    try {
+        const item = await api(`/item/${itemId}`);
+        populateDetailDrawer(item);
+        
+        // Load comments
+        await loadComments(itemId);
+        
+        show('drawer-overlay');
+        show('detail-drawer');
+    } catch (e) {
+        console.error('Failed to load item:', e);
+    }
+}
+
+/**
+ * Close detail drawer
+ */
+function closeDetailDrawer() {
+    hide('drawer-overlay');
+    hide('detail-drawer');
+    state.selectedItemId = null;
+}
+
+/**
+ * Populate detail drawer with item data
+ */
+function populateDetailDrawer(item) {
+    document.getElementById('drawer-title').textContent = item.identifier;
+    
+    // Type chip
+    const typeEl = document.getElementById('detail-type');
+    typeEl.textContent = item.type;
+    typeEl.className = `chip ${item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal'}`;
+    
+    // Info fields
+    document.getElementById('detail-bucket').textContent = getBucketName(item.bucket);
+    document.getElementById('detail-identifier').textContent = item.identifier;
+    document.getElementById('detail-date-received').textContent = formatDate(item.date_received) || '-';
+    document.getElementById('detail-created').textContent = formatDateTime(item.created_at);
+    document.getElementById('detail-last-email').textContent = formatDateTime(item.last_email_at);
+    document.getElementById('detail-subject').textContent = item.source_subject || 'Manual entry';
+    
+    // Warning banner for insufficient window
+    const warningBanner = document.getElementById('insufficient-window-warning');
+    const warningText = document.getElementById('warning-text');
+    if (item.is_contractor_window_insufficient) {
+        warningText.textContent = `⚠️ Contractor provided insufficient review window`;
+        show(warningBanner);
+    } else {
+        hide(warningBanner);
+    }
+    
+    // Editable fields
+    document.getElementById('detail-title-input').value = item.title || '';
+    document.getElementById('detail-due-date').value = item.due_date || '';
+    document.getElementById('detail-priority').value = item.priority || '';
+    document.getElementById('detail-status').value = item.status || 'Unassigned';
+    document.getElementById('detail-folder').value = item.folder_link || '';
+    document.getElementById('detail-notes').value = item.notes || '';
+    
+    // Reviewer fields
+    document.getElementById('detail-initial-reviewer').value = item.initial_reviewer_id || '';
+    document.getElementById('detail-qcr').value = item.qcr_id || '';
+    
+    // Calculated due dates - now editable inputs with color coding
+    const initialReviewerDue = document.getElementById('detail-initial-reviewer-due');
+    const qcrDue = document.getElementById('detail-qcr-due');
+    
+    initialReviewerDue.value = item.initial_reviewer_due_date || '';
+    initialReviewerDue.className = `calculated-date-input ${getDueDateClass(item.initial_reviewer_due_status)}`;
+    
+    qcrDue.value = item.qcr_due_date || '';
+    qcrDue.className = `calculated-date-input ${getDueDateClass(item.qcr_due_status)}`;
+    
+    // Clear reviewer error
+    hide('reviewer-error');
+    
+    // Response fields
+    document.getElementById('detail-response-category').value = item.response_category || '';
+    document.getElementById('detail-response-text').value = item.response_text || '';
+    
+    // Load files section - show checkboxes for file selection
+    const folderPath = item.folder_link;
+    const fileListEl = document.getElementById('file-list');
+    
+    if (folderPath) {
+        loadFileCheckboxes(item.id, item.response_files, folderPath);
+    } else {
+        fileListEl.innerHTML = '<p class="text-muted">No folder linked. Set a folder path in Files Folder above first.</p>';
+    }
+    
+    // Closeout buttons visibility
+    const closeBtn = document.getElementById('btn-close-item');
+    const reopenBtn = document.getElementById('btn-reopen-item');
+    const closedInfo = document.getElementById('closed-at-info');
+    
+    if (item.closed_at) {
+        hide(closeBtn);
+        closedInfo.textContent = `Closed on ${formatDateTime(item.closed_at)}`;
+        show(closedInfo);
+        
+        // Only show reopen button for admins
+        if (state.user && state.user.role === 'admin') {
+            show(reopenBtn);
+        } else {
+            hide(reopenBtn);
+        }
+    } else {
+        show(closeBtn);
+        hide(reopenBtn);
+        hide(closedInfo);
+    }
+    
+    // Update workflow status in drawer
+    updateDrawerWorkflowStatus(item);
+}
+
+/**
+ * Load comments for an item
+ */
+async function loadComments(itemId) {
+    try {
+        const comments = await api(`/comments/${itemId}`);
+        renderComments(comments);
+    } catch (e) {
+        console.error('Failed to load comments:', e);
+    }
+}
+
+/**
+ * Render comments list
+ */
+function renderComments(comments) {
+    const list = document.getElementById('comments-list');
+    
+    if (comments.length === 0) {
+        list.innerHTML = '<p class="text-muted">No comments yet</p>';
+        return;
+    }
+    
+    list.innerHTML = comments.map(comment => `
+        <div class="comment-item">
+            <div class="comment-header">
+                <span class="comment-author">${escapeHtml(comment.author_name)}</span>
+                <span class="comment-date">${formatDateTime(comment.created_at)}</span>
+            </div>
+            <div class="comment-body">${escapeHtml(comment.body)}</div>
+        </div>
+    `).join('');
+}
+
+/**
+ * Validate reviewer selections (Initial Reviewer cannot be the same as QCR)
+ */
+function validateReviewers() {
+    const initialReviewerId = document.getElementById('detail-initial-reviewer').value;
+    const qcrId = document.getElementById('detail-qcr').value;
+    const errorEl = document.getElementById('reviewer-error');
+    
+    if (initialReviewerId && qcrId && initialReviewerId === qcrId) {
+        errorEl.style.display = 'block';
+        return false;
+    } else {
+        errorEl.style.display = 'none';
+        return true;
+    }
+}
+
+/**
+ * Save item changes
+ */
+async function saveItem() {
+    if (!state.selectedItemId) return;
+    
+    // Validate reviewers first
+    if (!validateReviewers()) {
+        alert('Initial Reviewer and QCR cannot be the same person.');
+        return;
+    }
+    
+    const data = {
+        title: document.getElementById('detail-title-input').value,
+        due_date: document.getElementById('detail-due-date').value || null,
+        priority: document.getElementById('detail-priority').value || null,
+        status: document.getElementById('detail-status').value,
+        initial_reviewer_id: document.getElementById('detail-initial-reviewer').value || null,
+        qcr_id: document.getElementById('detail-qcr').value || null,
+        initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
+        qcr_due_date: document.getElementById('detail-qcr-due').value || null,
+        notes: document.getElementById('detail-notes').value
+    };
+    
+    try {
+        await api(`/item/${state.selectedItemId}`, {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        // Refresh data
+        await loadItems();
+        await loadStats();
+        
+        // Close the drawer
+        closeDetailDrawer();
+        
+    } catch (e) {
+        alert('Failed to save: ' + e.message);
+    }
+}
+
+/**
+ * Add a comment
+ */
+async function addComment() {
+    if (!state.selectedItemId) return;
+    
+    const textarea = document.getElementById('new-comment');
+    const body = textarea.value.trim();
+    
+    if (!body) return;
+    
+    try {
+        await api(`/comments/${state.selectedItemId}`, {
+            method: 'POST',
+            body: JSON.stringify({ body })
+        });
+        
+        textarea.value = '';
+        await loadComments(state.selectedItemId);
+    } catch (e) {
+        alert('Failed to add comment: ' + e.message);
+    }
+}
+
+/**
+ * Open folder in explorer
+ */
+function openFolder() {
+    const folderPath = document.getElementById('detail-folder').value;
+    
+    if (!folderPath) {
+        alert('No folder path set for this item.');
+        return;
+    }
+    
+    openFilesFolder(folderPath);
+}
+
+/**
+ * Open a folder path in Windows Explorer via backend API
+ */
+async function openFilesFolder(folderPath) {
+    try {
+        const result = await api('/open-folder', {
+            method: 'POST',
+            body: JSON.stringify({ path: folderPath })
+        });
+        
+        if (result.success) {
+            console.log('Opened folder:', result.path);
+        }
+    } catch (e) {
+        // Fallback: copy path to clipboard
+        navigator.clipboard.writeText(folderPath).then(() => {
+            alert(`Could not open folder automatically.\n\nPath copied to clipboard:\n${folderPath}\n\nPaste into Windows Explorer.`);
+        }).catch(() => {
+            alert(`Could not open folder.\n\nManually navigate to:\n${folderPath}`);
+        });
+    }
+}
+
+// =============================================================================
+// INBOX FUNCTIONS
+// =============================================================================
+
+/**
+ * Load inbox items (assigned to current user)
+ */
+async function loadInbox() {
+    try {
+        state.items = await api('/inbox');
+        renderItems();
+        
+        // Update page title
+        document.getElementById('page-title').textContent = 'My Inbox';
+    } catch (e) {
+        console.error('Failed to load inbox:', e);
+    }
+}
+
+/**
+ * Switch to inbox view
+ */
+function switchToInbox() {
+    state.currentView = 'inbox';
+    
+    // Update nav active state - remove from all, add to inbox
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === 'inbox');
+    });
+    
+    // Show table container, hide other containers
+    show('table-container');
+    hide('workflow-container');
+    hide('notifications-container');
+    
+    loadInbox();
+}
+
+/**
+ * Switch to items view (bucket tabs)
+ */
+function switchToItems(bucket) {
+    state.currentView = 'items';
+    
+    // Update nav active state
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        if (tab.dataset.bucket) {
+            tab.classList.toggle('active', tab.dataset.bucket === bucket);
+        } else {
+            tab.classList.remove('active');
+        }
+    });
+    
+    // Show table container, hide other containers
+    show('table-container');
+    hide('workflow-container');
+    hide('notifications-container');
+    
+    switchBucket(bucket);
+}
+
+/**
+ * Mark item as read
+ */
+async function markItemAsRead(itemId) {
+    try {
+        await api(`/item/${itemId}/mark-read`, { method: 'POST' });
+    } catch (e) {
+        console.error('Failed to mark as read:', e);
+    }
+}
+
+// =============================================================================
+// WORKFLOW FUNCTIONS
+// =============================================================================
+
+/**
+ * Load workflow items
+ */
+async function loadWorkflow() {
+    try {
+        state.workflowItems = await api('/admin/workflow');
+        renderWorkflow();
+    } catch (e) {
+        console.error('Failed to load workflow:', e);
+    }
+}
+
+/**
+ * Render workflow table
+ */
+function renderWorkflow() {
+    const tbody = document.getElementById('workflow-table-body');
+    const emptyState = document.getElementById('workflow-empty-state');
+    
+    if (!state.workflowItems || state.workflowItems.length === 0) {
+        tbody.innerHTML = '';
+        show(emptyState);
+        return;
+    }
+    
+    hide(emptyState);
+    
+    tbody.innerHTML = state.workflowItems.map(item => {
+        const reviewerStatus = item.reviewer_response_status || 'Not Sent';
+        const qcrStatus = item.qcr_response_status || 'Not Sent';
+        
+        const canSendReviewer = item.reviewer_name && !item.reviewer_email_sent_at;
+        const canResendReviewer = item.reviewer_email_sent_at && !item.reviewer_response_at;
+        const canResendQcr = item.qcr_email_sent_at && !item.qcr_response_at;
+        
+        let reviewerActions = '';
+        if (canSendReviewer) {
+            reviewerActions = `<button class="workflow-action-btn" onclick="sendReviewerEmail(${item.id})">📧 Send</button>`;
+        } else if (canResendReviewer) {
+            reviewerActions = `<button class="workflow-action-btn" onclick="sendReviewerEmail(${item.id})">🔄 Resend</button>`;
+        }
+        
+        let qcrActions = '';
+        if (canResendQcr) {
+            qcrActions = `<button class="workflow-action-btn" onclick="sendQcrEmail(${item.id})">🔄 Resend</button>`;
+        }
+        
+        // Format reviewer response details
+        let reviewerResponseHtml = '-';
+        if (item.reviewer_response_at) {
+            const category = item.reviewer_response_category || 'N/A';
+            let filesCount = 'No files';
+            try {
+                const files = item.reviewer_selected_files ? JSON.parse(item.reviewer_selected_files) : [];
+                filesCount = files.length > 0 ? `${files.length} file(s)` : 'No files';
+            } catch (e) {
+                if (item.reviewer_selected_files) filesCount = '✓ Files selected';
+            }
+            const notes = item.reviewer_notes ? `<div class="response-notes" title="${escapeHtml(item.reviewer_notes)}">${escapeHtml(item.reviewer_notes.substring(0, 50))}${item.reviewer_notes.length > 50 ? '...' : ''}</div>` : '';
+            const statusBadge = getReviewerStatusBadge(reviewerStatus);
+            reviewerResponseHtml = `
+                <div class="response-details">
+                    ${statusBadge}
+                    <div class="response-category"><strong>${escapeHtml(category)}</strong></div>
+                    <div class="response-files">📁 ${escapeHtml(filesCount)}</div>
+                    ${notes}
+                    <div class="response-time">${formatDateTime(item.reviewer_response_at)}</div>
+                </div>
+            `;
+        } else if (item.reviewer_email_sent_at) {
+            reviewerResponseHtml = `<div class="response-pending">⏳ Awaiting response<br><span style="font-size: 0.7rem;">Sent: ${formatDateTime(item.reviewer_email_sent_at)}</span></div>`;
+        } else {
+            reviewerResponseHtml = `<div class="response-not-sent">⚪ Not sent</div>`;
+        }
+        
+        // Format QC Decision
+        let qcDecisionHtml = '-';
+        if (item.qcr_response_at && item.qcr_action) {
+            const actionIcon = item.qcr_action === 'Approve' ? '✅' : 
+                              item.qcr_action === 'Modify' ? '✏️' : '↩️';
+            const actionColor = item.qcr_action === 'Approve' ? '#059669' : 
+                               item.qcr_action === 'Modify' ? '#2563eb' : '#dc2626';
+            const modeText = item.qcr_response_mode ? ` (${item.qcr_response_mode})` : '';
+            const qcrNotes = item.qcr_notes ? `<div class="response-notes" title="${escapeHtml(item.qcr_notes)}">${escapeHtml(item.qcr_notes.substring(0, 40))}${item.qcr_notes.length > 40 ? '...' : ''}</div>` : '';
+            qcDecisionHtml = `
+                <div class="response-details">
+                    <div class="qc-action-badge" style="color: ${actionColor}; font-weight: 600;">${actionIcon} ${escapeHtml(item.qcr_action)}</div>
+                    ${item.qcr_response_mode ? `<div class="qc-mode" style="font-size: 0.7rem; color: #666;">Mode: ${escapeHtml(item.qcr_response_mode)}</div>` : ''}
+                    ${qcrNotes}
+                    <div class="response-time">${formatDateTime(item.qcr_response_at)}</div>
+                </div>
+            `;
+        } else if (item.qcr_email_sent_at) {
+            qcDecisionHtml = `<div class="response-pending">⏳ Awaiting QC<br><span style="font-size: 0.7rem;">Sent: ${formatDateTime(item.qcr_email_sent_at)}</span></div>`;
+        } else if (item.reviewer_response_at) {
+            qcDecisionHtml = `<div class="response-pending" style="color: #f59e0b;">🔔 Ready for QC</div>`;
+        }
+        
+        // Format Final Response
+        let finalResponseHtml = '-';
+        if (item.final_response_category) {
+            let finalFilesCount = 'No files';
+            try {
+                const files = item.final_response_files ? JSON.parse(item.final_response_files) : [];
+                finalFilesCount = files.length > 0 ? `${files.length} file(s)` : 'No files';
+            } catch (e) {
+                if (item.final_response_files) finalFilesCount = '✓ Files';
+            }
+            finalResponseHtml = `
+                <div class="response-details">
+                    <div class="response-category" style="color: #059669;"><strong>✅ ${escapeHtml(item.final_response_category)}</strong></div>
+                    <div class="response-files">📁 ${escapeHtml(finalFilesCount)}</div>
+                </div>
+            `;
+        } else if (item.qcr_action === 'Send Back') {
+            finalResponseHtml = `<div class="response-pending" style="color: #dc2626;">↩️ Sent back for revision</div>`;
+        }
+        
+        // Format folder link
+        let folderHtml = '-';
+        if (item.folder_link) {
+            folderHtml = `<a href="#" onclick="copyFolderPath('${escapeHtml(item.folder_link)}'); return false;" title="Click to copy path" class="folder-link">📂 Copy</a>`;
+        }
+        
+        return `
+            <tr onclick="openItem(${item.id})" style="cursor: pointer;">
+                <td>
+                    <strong>${escapeHtml(item.type)} ${escapeHtml(item.identifier)}</strong>
+                    <div class="text-muted" style="font-size: 0.75rem;">${escapeHtml(item.title || '')}</div>
+                    <div class="text-muted" style="font-size: 0.7rem; color: #888;">Status: ${escapeHtml(item.status || 'N/A')}</div>
+                </td>
+                <td>${escapeHtml(item.reviewer_name || '-')}</td>
+                <td class="workflow-response-cell">${reviewerResponseHtml}</td>
+                <td>${escapeHtml(item.qcr_name || '-')}</td>
+                <td class="workflow-response-cell">${qcDecisionHtml}</td>
+                <td class="workflow-response-cell">${finalResponseHtml}</td>
+                <td>${folderHtml}</td>
+                <td onclick="event.stopPropagation();">${reviewerActions}${qcrActions}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+/**
+ * Get reviewer status badge HTML
+ */
+function getReviewerStatusBadge(status) {
+    if (status === 'Responded') {
+        return '<div class="status-badge responded">✓ Responded</div>';
+    } else if (status === 'Email Sent') {
+        return '<div class="status-badge email-sent">📧 Sent</div>';
+    }
+    return '';
+}
+
+/**
+ * Copy folder path to clipboard
+ */
+function copyFolderPath(path) {
+    navigator.clipboard.writeText(path).then(() => {
+        alert('Folder path copied to clipboard!');
+    }).catch(err => {
+        console.error('Failed to copy path:', err);
+        prompt('Copy this path:', path);
+    });
+}
+
+/**
+ * Get CSS class for workflow status badge
+ */
+function getWorkflowBadgeClass(status) {
+    switch (status) {
+        case 'Responded':
+            return 'responded';
+        case 'Email Sent':
+            return 'email-sent';
+        case 'Not Sent':
+        default:
+            return 'not-sent';
+    }
+}
+
+/**
+ * Send reviewer email
+ */
+async function sendReviewerEmail(itemId) {
+    try {
+        const result = await api(`/admin/send_reviewer_email/${itemId}`, { method: 'POST' });
+        alert(result.message || 'Email sent successfully!');
+        loadWorkflow();
+        // Also reload item details if open
+        if (state.selectedItemId === itemId) {
+            openItem(itemId);
+        }
+    } catch (e) {
+        alert('Failed to send email: ' + e.message);
+    }
+}
+
+/**
+ * Send QCR email
+ */
+async function sendQcrEmail(itemId) {
+    try {
+        const result = await api(`/admin/send_qcr_email/${itemId}`, { method: 'POST' });
+        alert(result.message || 'Email sent successfully!');
+        loadWorkflow();
+    } catch (e) {
+        alert('Failed to send email: ' + e.message);
+    }
+}
+
+/**
+ * Handle "Send to Reviewer" button click in drawer
+ */
+async function handleSendToReviewer() {
+    if (!state.selectedItemId) return;
+    
+    // Capture the item ID before saveItem clears it
+    const itemId = state.selectedItemId;
+    
+    // First save any changes
+    const reviewerId = document.getElementById('detail-initial-reviewer').value;
+    const qcrId = document.getElementById('detail-qcr').value;
+    
+    if (!reviewerId || !qcrId) {
+        alert('Please assign both an Initial Reviewer and a QCR before sending.');
+        return;
+    }
+    
+    if (reviewerId === qcrId) {
+        alert('Initial Reviewer and QCR must be different users.');
+        return;
+    }
+    
+    // Save the item first to ensure reviewers are up to date
+    await saveItem();
+    
+    // Then send the email using the captured ID
+    await sendReviewerEmail(itemId);
+}
+
+/**
+ * Switch to workflow view
+ */
+function switchToWorkflow() {
+    state.currentView = 'workflow';
+    
+    // Update nav active state
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === 'workflow');
+    });
+    
+    // Show workflow container, hide table container
+    hide('table-container');
+    hide('notifications-container');
+    show('workflow-container');
+    
+    // Update header
+    document.getElementById('page-title').textContent = 'Email & Responses';
+    document.getElementById('page-subtitle').textContent = 'Reviewer Workflow Status';
+    
+    loadWorkflow();
+}
+
+/**
+ * Switch to notifications view
+ */
+function switchToNotifications() {
+    state.currentView = 'notifications';
+    
+    // Update nav active state
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === 'notifications');
+    });
+    
+    // Show notifications container, hide other containers
+    hide('table-container');
+    hide('workflow-container');
+    show('notifications-container');
+    
+    // Update header
+    document.getElementById('page-title').textContent = 'Notifications';
+    document.getElementById('page-subtitle').textContent = 'System Updates & Action Items';
+    
+    loadNotifications();
+}
+
+/**
+ * Load notifications from API
+ */
+async function loadNotifications() {
+    try {
+        const response = await api('/notifications');
+        renderNotifications(response.notifications);
+    } catch (err) {
+        console.error('Failed to load notifications:', err);
+        showToast('Failed to load notifications', 'error');
+    }
+}
+
+/**
+ * Render notifications list
+ */
+function renderNotifications(notifications) {
+    const container = document.getElementById('notifications-list');
+    const emptyState = document.getElementById('notifications-empty-state');
+    
+    if (!notifications || notifications.length === 0) {
+        container.innerHTML = '';
+        show('notifications-empty-state');
+        return;
+    }
+    
+    hide('notifications-empty-state');
+    
+    container.innerHTML = notifications.map(n => {
+        const isUnread = !n.read_at;
+        const icon = getNotificationIcon(n.type);
+        const timeAgo = formatTimeAgo(n.created_at);
+        
+        let actionsHtml = '';
+        if (n.action_url && n.action_label) {
+            actionsHtml = `<button class="btn btn-primary btn-sm" onclick="handleNotificationAction(${n.id}, '${n.action_url}')">${n.action_label}</button>`;
+        }
+        if (n.type === 'response_ready' && n.item_id) {
+            actionsHtml += `<button class="btn btn-success btn-sm" onclick="markItemComplete(${n.item_id}, ${n.id})">✓ Mark Complete</button>`;
+        }
+        if (isUnread) {
+            actionsHtml += `<button class="btn btn-secondary btn-sm" onclick="markNotificationRead(${n.id})">Mark Read</button>`;
+        }
+        actionsHtml += `<button class="btn btn-secondary btn-sm" onclick="deleteNotification(${n.id})">×</button>`;
+        
+        return `
+            <div class="notification-item type-${n.type} ${isUnread ? 'unread' : ''}" data-id="${n.id}">
+                <div class="notification-icon">${icon}</div>
+                <div class="notification-content">
+                    <div class="notification-title">${escapeHtml(n.title)}</div>
+                    <div class="notification-message">${escapeHtml(n.message)}</div>
+                    <div class="notification-meta">
+                        <span class="notification-time">🕐 ${timeAgo}</span>
+                    </div>
+                </div>
+                <div class="notification-actions">
+                    ${actionsHtml}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Get icon for notification type
+ */
+function getNotificationIcon(type) {
+    const icons = {
+        'response_ready': '✅',
+        'sent_back': '↩️',
+        'info': 'ℹ️',
+        'warning': '⚠️',
+        'error': '❌'
+    };
+    return icons[type] || '🔔';
+}
+
+/**
+ * Format time ago string
+ */
+function formatTimeAgo(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins} min ago`;
+    if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+    if (diffDays < 7) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+    return formatDate(dateStr);
+}
+
+/**
+ * Mark a notification as read
+ */
+async function markNotificationRead(id) {
+    try {
+        await api(`/notifications/${id}/read`, { method: 'POST' });
+        loadNotifications();
+        updateNotificationCount();
+    } catch (err) {
+        console.error('Failed to mark notification read:', err);
+    }
+}
+
+/**
+ * Mark all notifications as read
+ */
+async function markAllNotificationsRead() {
+    try {
+        await api('/notifications/read-all', { method: 'POST' });
+        loadNotifications();
+        updateNotificationCount();
+        showToast('All notifications marked as read', 'success');
+    } catch (err) {
+        console.error('Failed to mark all notifications read:', err);
+        showToast('Failed to mark notifications read', 'error');
+    }
+}
+
+/**
+ * Delete a notification
+ */
+async function deleteNotification(id) {
+    try {
+        await api(`/notifications/${id}`, { method: 'DELETE' });
+        loadNotifications();
+        updateNotificationCount();
+    } catch (err) {
+        console.error('Failed to delete notification:', err);
+        showToast('Failed to delete notification', 'error');
+    }
+}
+
+/**
+ * Handle notification action button click
+ */
+function handleNotificationAction(notificationId, actionUrl) {
+    // Mark as read first
+    markNotificationRead(notificationId);
+    
+    // Navigate to the action URL or open drawer
+    if (actionUrl.startsWith('/')) {
+        window.location.href = actionUrl;
+    }
+}
+
+/**
+ * Mark an item as complete
+ */
+async function markItemComplete(itemId, notificationId) {
+    try {
+        await api(`/items/${itemId}/complete`, { method: 'POST' });
+        showToast('Item marked as complete', 'success');
+        
+        // Delete the notification since it's been acted upon
+        if (notificationId) {
+            await deleteNotification(notificationId);
+        }
+        
+        // Refresh relevant views
+        if (state.currentView === 'notifications') {
+            loadNotifications();
+        }
+        loadItems();
+    } catch (err) {
+        console.error('Failed to mark item complete:', err);
+        showToast('Failed to mark item complete', 'error');
+    }
+}
+
+/**
+ * Update notification count badge
+ */
+async function updateNotificationCount() {
+    try {
+        const response = await api('/notifications');
+        const unreadCount = response.notifications.filter(n => !n.read_at).length;
+        const badge = document.getElementById('count-notifications');
+        if (badge) {
+            badge.textContent = unreadCount > 0 ? unreadCount : '';
+            badge.dataset.count = unreadCount;
+        }
+    } catch (err) {
+        console.error('Failed to update notification count:', err);
+    }
+}
+
+/**
+ * Update send button state based on current dropdown values
+ */
+function updateSendButtonState() {
+    const sendBtn = document.getElementById('btn-send-to-reviewer');
+    const reviewerId = document.getElementById('detail-initial-reviewer').value;
+    const qcrId = document.getElementById('detail-qcr').value;
+    
+    // Check if both reviewers are selected in dropdowns
+    const hasReviewers = reviewerId && qcrId && reviewerId !== '' && qcrId !== '';
+    const sameReviewer = reviewerId === qcrId;
+    
+    if (!hasReviewers) {
+        sendBtn.disabled = true;
+        sendBtn.textContent = '📧 Assign Reviewers First';
+    } else if (sameReviewer) {
+        sendBtn.disabled = true;
+        sendBtn.textContent = '⚠️ Reviewers Must Be Different';
+    } else {
+        sendBtn.disabled = false;
+        sendBtn.textContent = '📧 Send to Reviewer';
+    }
+}
+
+/**
+ * Update workflow status display in drawer
+ */
+function updateDrawerWorkflowStatus(item) {
+    const workflowActions = document.getElementById('workflow-actions');
+    const statusInfo = document.getElementById('workflow-status-info');
+    const statusText = document.getElementById('workflow-status-text');
+    const sendBtn = document.getElementById('btn-send-to-reviewer');
+    
+    // First update based on current dropdown values
+    updateSendButtonState();
+    
+    // Then check workflow status from item data to override button state if needed
+    const emailSent = item.reviewer_email_sent_at;
+    const reviewerResponded = item.reviewer_response_at;
+    const qcrResponded = item.qcr_response_at;
+    
+    // Override button state based on workflow progress
+    if (emailSent && reviewerResponded && qcrResponded) {
+        sendBtn.disabled = true;
+        sendBtn.textContent = '✅ Review Complete';
+    } else if (emailSent) {
+        sendBtn.disabled = false;
+        sendBtn.textContent = '🔄 Resend to Reviewer';
+    }
+    
+    // Show status info if workflow has started
+    if (emailSent) {
+        let statusHtml = '';
+        
+        statusHtml += `<p><strong>Reviewer Email:</strong> Sent ${formatDateTime(item.reviewer_email_sent_at)}</p>`;
+        
+        if (reviewerResponded) {
+            statusHtml += `<p class="success"><strong>Reviewer Response:</strong> ${formatDateTime(item.reviewer_response_at)}</p>`;
+            statusHtml += `<p><strong>Category:</strong> ${item.reviewer_response_category || 'N/A'}</p>`;
+        } else {
+            statusHtml += `<p class="info"><strong>Reviewer Status:</strong> Awaiting Response</p>`;
+        }
+        
+        if (item.qcr_email_sent_at) {
+            statusHtml += `<p><strong>QCR Email:</strong> Sent ${formatDateTime(item.qcr_email_sent_at)}</p>`;
+            
+            if (qcrResponded) {
+                statusHtml += `<p class="success"><strong>QCR Response:</strong> ${formatDateTime(item.qcr_response_at)}</p>`;
+                statusHtml += `<p><strong>Final Category:</strong> ${item.qcr_response_category || 'N/A'}</p>`;
+            } else {
+                statusHtml += `<p class="info"><strong>QCR Status:</strong> Awaiting Response</p>`;
+            }
+        }
+        
+        statusText.innerHTML = statusHtml;
+        show(statusInfo);
+    } else {
+        hide(statusInfo);
+    }
+}
+
+// =============================================================================
+// RESPONSE FUNCTIONS
+// =============================================================================
+
+/**
+ * Load file checkboxes for an item
+ */
+async function loadFileCheckboxes(itemId, selectedFiles, folderPath) {
+    const fileListEl = document.getElementById('file-list');
+    
+    // Show loading state with open folder button
+    fileListEl.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span class="text-muted">Loading files...</span>
+            <button class="btn btn-outline btn-sm" id="btn-open-files-folder">📂 Open Folder</button>
+        </div>
+    `;
+    document.getElementById('btn-open-files-folder').addEventListener('click', () => openFilesFolder(folderPath));
+    
+    try {
+        const data = await api(`/item/${itemId}/files`);
+        const selectedArray = selectedFiles ? selectedFiles.split(',').map(f => f.trim()) : [];
+        
+        let html = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <span class="text-muted" style="font-size: 0.75rem;">${data.files.length} file(s) found</span>
+                <button class="btn btn-outline btn-sm" id="btn-open-files-folder">📂 Open Folder</button>
+            </div>
+        `;
+        
+        if (data.files.length === 0) {
+            html += '<p class="text-muted">No files in folder yet. Click "Open Folder" to add files.</p>';
+        } else {
+            html += '<div class="file-checkbox-items">';
+            data.files.forEach((file, index) => {
+                const isChecked = selectedArray.includes(file.filename) ? 'checked' : '';
+                const fileId = `file-${index}`;
+                html += `
+                    <div class="file-checkbox-item">
+                        <input type="checkbox" id="${fileId}" value="${escapeHtml(file.filename)}" ${isChecked}>
+                        <label for="${fileId}">${escapeHtml(file.filename)}</label>
+                    </div>
+                `;
+            });
+            html += '</div>';
+        }
+        
+        fileListEl.innerHTML = html;
+        
+        // Re-attach open folder button listener
+        document.getElementById('btn-open-files-folder').addEventListener('click', () => openFilesFolder(folderPath));
+        
+    } catch (e) {
+        fileListEl.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <span class="text-muted" style="color: var(--color-danger);">Error loading files</span>
+                <button class="btn btn-outline btn-sm" id="btn-open-files-folder">📂 Open Folder</button>
+            </div>
+            <p class="text-muted">${escapeHtml(e.message)}</p>
+        `;
+        document.getElementById('btn-open-files-folder').addEventListener('click', () => openFilesFolder(folderPath));
+    }
+}
+
+/**
+ * Save response
+ */
+async function saveResponse() {
+    if (!state.selectedItemId) return;
+    
+    // Get selected files from checkboxes
+    const fileCheckboxes = document.querySelectorAll('#file-list input[type="checkbox"]:checked');
+    const selectedFiles = Array.from(fileCheckboxes).map(cb => cb.value);
+    
+    const data = {
+        response_category: document.getElementById('detail-response-category').value || null,
+        response_text: document.getElementById('detail-response-text').value || null,
+        response_files: selectedFiles.length > 0 ? selectedFiles.join(', ') : null
+    };
+    
+    try {
+        await api(`/item/${state.selectedItemId}/response`, {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        // Show success
+        const btn = document.getElementById('btn-save-response');
+        const originalText = btn.textContent;
+        btn.textContent = '✓ Saved!';
+        setTimeout(() => btn.textContent = originalText, 1500);
+    } catch (e) {
+        alert('Failed to save response: ' + e.message);
+    }
+}
+
+// =============================================================================
+// CLOSEOUT FUNCTIONS
+// =============================================================================
+
+/**
+ * Close out an item
+ */
+async function closeItem() {
+    if (!state.selectedItemId) return;
+    
+    if (!confirm('Are you sure you want to close out this item? This will mark it as completed.')) {
+        return;
+    }
+    
+    try {
+        const result = await api(`/item/${state.selectedItemId}/close`, { method: 'POST' });
+        
+        // Update drawer UI
+        hide('btn-close-item');
+        document.getElementById('closed-at-info').textContent = `Closed on ${formatDateTime(result.closed_at)}`;
+        show('closed-at-info');
+        
+        if (state.user && state.user.role === 'admin') {
+            show('btn-reopen-item');
+        }
+        
+        // Refresh items
+        await loadItems();
+        await loadStats();
+    } catch (e) {
+        alert('Failed to close item: ' + e.message);
+    }
+}
+
+/**
+ * Reopen a closed item (admin only)
+ */
+async function reopenItem() {
+    if (!state.selectedItemId) return;
+    
+    if (!confirm('Are you sure you want to reopen this item?')) {
+        return;
+    }
+    
+    try {
+        await api(`/item/${state.selectedItemId}/reopen`, { method: 'POST' });
+        
+        // Update drawer UI
+        show('btn-close-item');
+        hide('btn-reopen-item');
+        hide('closed-at-info');
+        
+        // Refresh items
+        await loadItems();
+        await loadStats();
+    } catch (e) {
+        alert('Failed to reopen item: ' + e.message);
+    }
+}
+
+// =============================================================================
+// NEW ITEM MODAL
+// =============================================================================
+
+/**
+ * Open new item modal
+ */
+function openNewItemModal() {
+    show('new-item-modal');
+}
+
+/**
+ * Close new item modal
+ */
+function closeNewItemModal() {
+    hide('new-item-modal');
+    document.getElementById('new-item-form').reset();
+}
+
+/**
+ * Handle new item form submission
+ */
+async function handleNewItem(e) {
+    e.preventDefault();
+    
+    const data = {
+        type: document.getElementById('new-type').value,
+        bucket: document.getElementById('new-bucket').value,
+        identifier: document.getElementById('new-identifier').value,
+        title: document.getElementById('new-title').value || null,
+        due_date: document.getElementById('new-due-date').value || null,
+        priority: document.getElementById('new-priority').value || null
+    };
+    
+    try {
+        await api('/items', {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        closeNewItemModal();
+        await loadItems();
+        await loadStats();
+    } catch (e) {
+        alert('Failed to create item: ' + e.message);
+    }
+}
+
+// =============================================================================
+// ACC MODAL (PLACEHOLDER)
+// =============================================================================
+
+function openAccModal() {
+    show('acc-modal');
+}
+
+function closeAccModal() {
+    hide('acc-modal');
+}
+
+// =============================================================================
+// USERS MODAL
+// =============================================================================
+
+function openUsersModal() {
+    renderUsersList();
+    show('users-modal');
+}
+
+function closeUsersModal() {
+    hide('users-modal');
+}
+
+function renderUsersList() {
+    const list = document.getElementById('users-list');
+    
+    list.innerHTML = state.users.map(user => `
+        <div class="user-row">
+            <div class="user-avatar">
+                <span>${getInitials(user.display_name)}</span>
+            </div>
+            <div class="user-info">
+                <div class="user-info-name">${escapeHtml(user.display_name)}</div>
+                <div class="user-info-email">${escapeHtml(user.email)}</div>
+            </div>
+            <span class="user-role">${user.role}</span>
+        </div>
+    `).join('');
+}
+
+// =============================================================================
+// OUTLOOK CONTACT AUTOCOMPLETE
+// =============================================================================
+
+let autocompleteTimeout = null;
+
+async function searchOutlookContacts(query) {
+    if (!query || query.length < 2) {
+        hideAutocomplete();
+        return;
+    }
+    
+    try {
+        const results = await api(`/outlook/contacts?q=${encodeURIComponent(query)}`);
+        showAutocomplete(results);
+    } catch (e) {
+        console.error('Outlook search error:', e);
+        hideAutocomplete();
+    }
+}
+
+function showAutocomplete(contacts) {
+    const dropdown = document.getElementById('email-autocomplete');
+    
+    if (!contacts || contacts.length === 0) {
+        hideAutocomplete();
+        return;
+    }
+    
+    dropdown.innerHTML = contacts.map(contact => `
+        <div class="autocomplete-item" data-email="${escapeHtml(contact.email)}" data-name="${escapeHtml(contact.display_name)}">
+            <div class="autocomplete-name">${escapeHtml(contact.display_name)}</div>
+            <div class="autocomplete-email">${escapeHtml(contact.email)}</div>
+        </div>
+    `).join('');
+    
+    show(dropdown);
+    
+    // Add click handlers to items
+    dropdown.querySelectorAll('.autocomplete-item').forEach(item => {
+        item.addEventListener('click', () => selectAutocompleteItem(item));
+    });
+}
+
+function hideAutocomplete() {
+    hide(document.getElementById('email-autocomplete'));
+}
+
+function selectAutocompleteItem(item) {
+    const email = item.dataset.email;
+    const name = item.dataset.name;
+    
+    document.getElementById('new-user-email').value = email;
+    
+    // Auto-fill display name if empty
+    const nameInput = document.getElementById('new-user-name');
+    if (!nameInput.value.trim()) {
+        nameInput.value = name;
+    }
+    
+    hideAutocomplete();
+}
+
+function setupEmailAutocomplete() {
+    const emailInput = document.getElementById('new-user-email');
+    
+    emailInput.addEventListener('input', (e) => {
+        // Debounce the search
+        if (autocompleteTimeout) {
+            clearTimeout(autocompleteTimeout);
+        }
+        
+        autocompleteTimeout = setTimeout(() => {
+            searchOutlookContacts(e.target.value);
+        }, 300);  // Wait 300ms after typing stops
+    });
+    
+    emailInput.addEventListener('focus', (e) => {
+        if (e.target.value.length >= 2) {
+            searchOutlookContacts(e.target.value);
+        }
+    });
+    
+    emailInput.addEventListener('blur', (e) => {
+        // Delay hiding to allow click on dropdown items
+        setTimeout(hideAutocomplete, 200);
+    });
+    
+    // Keyboard navigation
+    emailInput.addEventListener('keydown', (e) => {
+        const dropdown = document.getElementById('email-autocomplete');
+        if (dropdown.classList.contains('hidden')) return;
+        
+        const items = dropdown.querySelectorAll('.autocomplete-item');
+        const activeItem = dropdown.querySelector('.autocomplete-item.active');
+        
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (!activeItem) {
+                items[0]?.classList.add('active');
+            } else {
+                const idx = Array.from(items).indexOf(activeItem);
+                activeItem.classList.remove('active');
+                items[(idx + 1) % items.length]?.classList.add('active');
+            }
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!activeItem) {
+                items[items.length - 1]?.classList.add('active');
+            } else {
+                const idx = Array.from(items).indexOf(activeItem);
+                activeItem.classList.remove('active');
+                items[(idx - 1 + items.length) % items.length]?.classList.add('active');
+            }
+        } else if (e.key === 'Enter' && activeItem) {
+            e.preventDefault();
+            selectAutocompleteItem(activeItem);
+        } else if (e.key === 'Escape') {
+            hideAutocomplete();
+        }
+    });
+}
+
+// =============================================================================
+// USER MANAGEMENT
+// =============================================================================
+
+async function handleNewUser(e) {
+    e.preventDefault();
+    
+    const email = document.getElementById('new-user-email').value.trim();
+    const displayName = document.getElementById('new-user-name').value.trim();
+    const password = document.getElementById('new-user-password').value;
+    const role = document.getElementById('new-user-role').value;
+    
+    if (!email) {
+        alert('Email is required');
+        return;
+    }
+    
+    const data = {
+        email: email,
+        display_name: displayName || null,
+        role: role
+    };
+    
+    // Only include password if provided
+    if (password) {
+        data.password = password;
+    }
+    
+    try {
+        await api('/users', {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        document.getElementById('new-user-form').reset();
+        hideAutocomplete();
+        await loadUsers();
+        renderUsersList();
+    } catch (e) {
+        alert('Failed to create user: ' + e.message);
+    }
+}
+
+// =============================================================================
+// SETTINGS MODAL
+// =============================================================================
+
+async function openSettingsModal() {
+    try {
+        const config = await api('/config');
+        document.getElementById('setting-project-name').value = config.project_name || '';
+        document.getElementById('setting-base-folder').value = config.base_folder_path || '';
+        document.getElementById('setting-outlook-folder').value = config.outlook_folder || '';
+        document.getElementById('setting-poll-interval').value = config.poll_interval_minutes || 5;
+        show('settings-modal');
+    } catch (e) {
+        alert('Failed to load settings: ' + e.message);
+    }
+}
+
+function closeSettingsModal() {
+    hide('settings-modal');
+}
+
+async function handleSaveSettings(e) {
+    e.preventDefault();
+    
+    const data = {
+        project_name: document.getElementById('setting-project-name').value,
+        base_folder_path: document.getElementById('setting-base-folder').value,
+        outlook_folder: document.getElementById('setting-outlook-folder').value,
+        poll_interval_minutes: parseInt(document.getElementById('setting-poll-interval').value) || 5
+    };
+    
+    try {
+        await api('/config', {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        closeSettingsModal();
+        
+        // Update project name in UI
+        document.getElementById('project-name').textContent = data.project_name;
+    } catch (e) {
+        alert('Failed to save settings: ' + e.message);
+    }
+}
+
+// =============================================================================
+// NAVIGATION
+// =============================================================================
+
+/**
+ * Switch to a bucket tab
+ */
+function switchBucket(bucket) {
+    state.currentBucket = bucket;
+    
+    // Update active tab
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.bucket === bucket);
+    });
+    
+    // Update header
+    const titles = {
+        'ALL': 'All Items',
+        'ACC_TURNER': 'ACC Turner',
+        'ACC_MORTENSON': 'ACC Mortenson',
+        'ACC_FTI': 'ACC FTI'
+    };
+    document.getElementById('page-title').textContent = titles[bucket] || bucket;
+    
+    // Reload items
+    loadItems();
+}
+
+/**
+ * Set type filter
+ */
+function setTypeFilter(type) {
+    state.currentTypeFilter = type;
+    
+    // Update active filter chip
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.classList.toggle('active', chip.dataset.value === type);
+    });
+    
+    // Reload items
+    loadItems();
+}
+
+// =============================================================================
+// EVENT LISTENERS
+// =============================================================================
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Login form
+    document.getElementById('login-form').addEventListener('submit', handleLogin);
+    
+    // Navigation tabs - handle both bucket tabs and inbox/workflow tabs
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            if (tab.dataset.view === 'inbox') {
+                switchToInbox();
+            } else if (tab.dataset.view === 'workflow') {
+                switchToWorkflow();
+            } else if (tab.dataset.view === 'notifications') {
+                switchToNotifications();
+            } else if (tab.dataset.bucket) {
+                switchToItems(tab.dataset.bucket);
+            }
+        });
+    });
+    
+    // Mark All Read button
+    const markAllReadBtn = document.getElementById('btn-mark-all-read');
+    if (markAllReadBtn) {
+        markAllReadBtn.addEventListener('click', markAllNotificationsRead);
+    }
+    
+    // Show Closed toggle
+    const showClosedCheckbox = document.getElementById('show-closed-checkbox');
+    if (showClosedCheckbox) {
+        showClosedCheckbox.addEventListener('change', (e) => {
+            state.showClosed = e.target.checked;
+            if (state.currentView === 'inbox') {
+                loadInbox();
+            } else {
+                loadItems();
+            }
+        });
+    }
+    
+    // Type filter chips
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.addEventListener('click', () => setTypeFilter(chip.dataset.value));
+    });
+    
+    // Sidebar collapse toggle
+    document.getElementById('btn-collapse-sidebar').addEventListener('click', toggleSidebar);
+    
+    // Items table row clicks
+    document.getElementById('items-table-body').addEventListener('click', (e) => {
+        const row = e.target.closest('tr');
+        if (row && row.dataset.itemId) {
+            const itemId = parseInt(row.dataset.itemId);
+            openDetailDrawer(itemId);
+            markItemAsRead(itemId);
+        }
+    });
+    
+    // Detail drawer
+    document.getElementById('drawer-overlay').addEventListener('click', closeDetailDrawer);
+    document.getElementById('btn-close-drawer').addEventListener('click', closeDetailDrawer);
+    document.getElementById('btn-save-item').addEventListener('click', saveItem);
+    document.getElementById('btn-add-comment').addEventListener('click', addComment);
+    document.getElementById('btn-open-folder').addEventListener('click', openFolder);
+    
+    // Reviewer validation - check when either reviewer dropdown changes
+    document.getElementById('detail-initial-reviewer').addEventListener('change', () => {
+        validateReviewers();
+        updateSendButtonState();
+    });
+    document.getElementById('detail-qcr').addEventListener('change', () => {
+        validateReviewers();
+        updateSendButtonState();
+    });
+    
+    // Response and closeout buttons
+    document.getElementById('btn-save-response').addEventListener('click', saveResponse);
+    document.getElementById('btn-close-item').addEventListener('click', closeItem);
+    document.getElementById('btn-reopen-item').addEventListener('click', reopenItem);
+    
+    // Send to Reviewer button
+    document.getElementById('btn-send-to-reviewer').addEventListener('click', handleSendToReviewer);
+    
+    // New item modal
+    document.getElementById('btn-new-item').addEventListener('click', openNewItemModal);
+    document.getElementById('btn-close-new-item').addEventListener('click', closeNewItemModal);
+    document.getElementById('new-item-form').addEventListener('submit', handleNewItem);
+    
+    // ACC modal
+    document.getElementById('btn-connect-acc').addEventListener('click', openAccModal);
+    document.getElementById('btn-import-acc').addEventListener('click', openAccModal);
+    document.getElementById('btn-close-acc').addEventListener('click', closeAccModal);
+    
+    // Users modal
+    document.getElementById('btn-manage-users').addEventListener('click', openUsersModal);
+    document.getElementById('btn-close-users').addEventListener('click', closeUsersModal);
+    document.getElementById('new-user-form').addEventListener('submit', handleNewUser);
+    setupEmailAutocomplete();  // Setup Outlook contact search
+    
+    // Settings modal
+    document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
+    document.getElementById('btn-close-settings').addEventListener('click', closeSettingsModal);
+    document.getElementById('settings-form').addEventListener('submit', handleSaveSettings);
+    
+    // User menu
+    document.getElementById('user-avatar').addEventListener('click', () => {
+        toggle('user-dropdown');
+    });
+    
+    document.getElementById('btn-logout').addEventListener('click', handleLogout);
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+        const dropdown = document.getElementById('user-dropdown');
+        const avatar = document.getElementById('user-avatar');
+        if (!dropdown.contains(e.target) && !avatar.contains(e.target)) {
+            hide(dropdown);
+        }
+    });
+    
+    // Close modals on overlay click
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                hide(overlay);
+            }
+        });
+    });
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeDetailDrawer();
+            closeNewItemModal();
+            closeAccModal();
+            closeUsersModal();
+            closeSettingsModal();
+            hide('user-dropdown');
+        }
+    });
+    
+    // Periodic refresh
+    setInterval(async () => {
+        if (state.user) {
+            await loadStats();
+            await loadPollingStatus();
+            await updateNotificationCount();
+        }
+    }, 60000); // Every minute
+    
+    // Initial auth check
+    checkAuth();
+});
