@@ -476,11 +476,117 @@ REVIEWER_RESPONSE_TEMPLATE = '''
 <head>
     <title>Review Response - {{ item.type }} {{ item.identifier }}</title>
     ''' + BASE_PAGE_STYLE + '''
+    <style>
+        .version-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .resubmit-notice {
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .resubmit-notice h3 {
+            margin: 0 0 8px 0;
+            color: #92400e;
+        }
+        .previous-response {
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .previous-response h4 {
+            margin: 0 0 10px 0;
+            color: #0369a1;
+        }
+        .qcr-feedback {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .qcr-feedback h4 {
+            margin: 0 0 10px 0;
+            color: #991b1b;
+        }
+        .version-history {
+            font-size: 12px;
+            color: #666;
+            margin-top: 10px;
+        }
+        .closed-notice {
+            background: #f3f4f6;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+        .closed-notice h3 {
+            color: #6b7280;
+            margin: 0 0 10px 0;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
-        <h1>Initial Review Response</h1>
+        <h1>Initial Review Response <span class="version-badge">v{{ version }}</span></h1>
         <p class="subtitle">{{ item.type }} {{ item.identifier }}</p>
+        
+        {% if is_closed %}
+        <div class="closed-notice">
+            <h3>🔒 This Item Has Been Closed</h3>
+            <p>No further changes can be submitted. Contact the project administrator if this is unexpected.</p>
+        </div>
+        {% elif not can_submit %}
+        <div class="closed-notice">
+            <h3>⚠️ Submission Not Allowed</h3>
+            <p>This item has been finalized in QC. Contact the project administrator if additional changes are required.</p>
+        </div>
+        {% else %}
+        
+        {% if is_resubmit and qcr_feedback %}
+        <div class="qcr-feedback">
+            <h4>↩️ QC Reviewer Requested Revisions</h4>
+            <p><strong>Feedback on your v{{ version - 1 }} response:</strong></p>
+            <div style="background: white; padding: 10px; border-radius: 4px; margin-top: 8px;">
+                {{ qcr_feedback|replace('\n', '<br>')|safe }}
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if is_resubmit and previous_response %}
+        <div class="previous-response">
+            <h4>📄 Your Previous Response (v{{ version - 1 }})</h4>
+            <p><strong>Category:</strong> {{ previous_response.category or 'N/A' }}</p>
+            <p><strong>Notes:</strong></p>
+            <div style="background: white; padding: 10px; border-radius: 4px; margin-top: 8px;">
+                {{ (previous_response.text or 'No notes')|replace('\n', '<br>')|safe }}
+            </div>
+            {% if version_history %}
+            <div class="version-history">
+                <strong>Version History:</strong> {{ version_history }}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        {% if is_resubmit %}
+        <div class="resubmit-notice">
+            <h3>📝 Resubmitting Response</h3>
+            <p>You are updating your response to version {{ version }}. The QC Reviewer will be notified of your changes.</p>
+        </div>
+        {% endif %}
         
         <div class="info-box">
             <div class="info-row">
@@ -508,11 +614,11 @@ REVIEWER_RESPONSE_TEMPLATE = '''
                 <label for="response_category">Response Category *</label>
                 <select name="response_category" id="response_category" required>
                     <option value="">-- Select --</option>
-                    <option value="Approved">Approved</option>
-                    <option value="Approved as Noted">Approved as Noted</option>
-                    <option value="For Record Only">For Record Only</option>
-                    <option value="Rejected">Rejected</option>
-                    <option value="Revise and Resubmit">Revise and Resubmit</option>
+                    <option value="Approved" {% if previous_response and previous_response.category == 'Approved' %}selected{% endif %}>Approved</option>
+                    <option value="Approved as Noted" {% if previous_response and previous_response.category == 'Approved as Noted' %}selected{% endif %}>Approved as Noted</option>
+                    <option value="For Record Only" {% if previous_response and previous_response.category == 'For Record Only' %}selected{% endif %}>For Record Only</option>
+                    <option value="Rejected" {% if previous_response and previous_response.category == 'Rejected' %}selected{% endif %}>Rejected</option>
+                    <option value="Revise and Resubmit" {% if previous_response and previous_response.category == 'Revise and Resubmit' %}selected{% endif %}>Revise and Resubmit</option>
                 </select>
             </div>
             
@@ -522,7 +628,7 @@ REVIEWER_RESPONSE_TEMPLATE = '''
                     {% if files %}
                         {% for file in files %}
                         <div class="file-item">
-                            <input type="checkbox" name="selected_files" value="{{ file }}" id="file_{{ loop.index }}">
+                            <input type="checkbox" name="selected_files" value="{{ file }}" id="file_{{ loop.index }}" {% if previous_files and file in previous_files %}checked{% endif %}>
                             <label for="file_{{ loop.index }}">{{ file }}</label>
                         </div>
                         {% endfor %}
@@ -534,11 +640,12 @@ REVIEWER_RESPONSE_TEMPLATE = '''
             
             <div class="form-group">
                 <label for="notes">Notes / Comments</label>
-                <textarea name="notes" id="notes" placeholder="Add any notes for the QC Reviewer and project record..."></textarea>
+                <textarea name="notes" id="notes" placeholder="Add any notes for the QC Reviewer and project record...">{{ previous_response.text if previous_response else '' }}</textarea>
             </div>
             
-            <button type="submit" class="btn">Submit Review</button>
+            <button type="submit" class="btn">{% if is_resubmit %}Submit Revision (v{{ version }}){% else %}Submit Review{% endif %}</button>
         </form>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -635,12 +742,32 @@ QCR_RESPONSE_TEMPLATE = '''
             margin-top: 15px;
             color: #991b1b;
         }
+        .version-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>QC Review</h1>
+        <h1>QC Review <span class="version-badge">v{{ version }}</span></h1>
         <p class="subtitle">{{ item.type }} {{ item.identifier }}</p>
+        
+        {% if version_history %}
+        <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 12px; margin-bottom: 15px; font-size: 13px;">
+            <strong>📋 Reviewer Response Version History:</strong><br>
+            Current: <strong>v{{ version }}</strong> ({{ item.reviewer_response_at[:16]|replace('T', ' ') if item.reviewer_response_at else 'N/A' }})<br>
+            {% for v in version_history %}
+            Previous: v{{ v.version }} ({{ v.submitted_at[:16]|replace('T', ' ') }}) - {{ v.response_category or 'N/A' }}{% if not loop.last %}<br>{% endif %}
+            {% endfor %}
+        </div>
+        {% endif %}
         
         <div class="info-box">
             <div class="info-row">
@@ -1102,6 +1229,28 @@ def init_db():
             cursor.execute(f'ALTER TABLE item ADD COLUMN {col_name} {col_type}')
         except:
             pass
+    
+    # Add reviewer_response_version column for version tracking
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN reviewer_response_version INTEGER DEFAULT 1')
+    except:
+        pass
+    
+    # Reviewer response history table for version tracking
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reviewer_response_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            response_category TEXT,
+            response_text TEXT,
+            response_files TEXT,
+            submitted_by_user_id INTEGER,
+            FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+            FOREIGN KEY (submitted_by_user_id) REFERENCES user(id)
+        )
+    ''')
     
     # Notification table
     cursor.execute('''
@@ -1746,7 +1895,7 @@ def send_reviewer_assignment_email(item_id):
         conn.close()
         return {'success': False, 'error': str(e)}
 
-def send_qcr_assignment_email(item_id):
+def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     """Send assignment email to the QCR with magic link."""
     if not HAS_WIN32COM:
         return {'success': False, 'error': 'Outlook not available'}
@@ -1783,6 +1932,23 @@ def send_qcr_assignment_email(item_id):
     # Build the magic link URL
     respond_url = f"{get_app_host()}/respond/qcr?token={token}"
     
+    # Get version info
+    current_version = version or item['reviewer_response_version'] or 1
+    
+    # Get version history for display
+    cursor.execute('''
+        SELECT version, submitted_at 
+        FROM reviewer_response_history 
+        WHERE item_id = ? 
+        ORDER BY version DESC
+        LIMIT 5
+    ''', (item_id,))
+    history = cursor.fetchall()
+    version_history_html = ''
+    if history:
+        history_parts = [f"v{h['version']} ({h['submitted_at'][:16].replace('T', ' ')})" for h in history]
+        version_history_html = f"<p style='font-size: 12px; color: #666;'><strong>Previous versions:</strong> {', '.join(history_parts)}</p>"
+    
     # Format reviewer response time
     reviewer_response_time = item['reviewer_response_at'] or 'N/A'
     if reviewer_response_time != 'N/A':
@@ -1809,18 +1975,23 @@ def send_qcr_assignment_email(item_id):
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
     
-    # Build email content
-    subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review"
+    # Build subject and intro based on whether this is a revision
+    if is_revision:
+        subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review (v{current_version})"
+        intro_text = f"<strong style='color: #f59e0b;'>📝 Revision v{current_version}</strong> - The Initial Reviewer has submitted an updated response after your feedback. Please complete a new QC review."
+    else:
+        subject = f"[LEB] {item['type']} {item['identifier']} – Ready for Your Review"
+        intro_text = "The Initial Reviewer has submitted their response. Please complete the QC review."
     
     html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
     <h2 style="color:#444; margin-bottom:6px;">
-        [LEB] {item['type']} {item['identifier']} – Ready for Your Review
+        [LEB] {item['type']} {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
     </h2>
 
     <p style="margin-top:0; font-size:13px; color:#666;">
-        The Initial Reviewer has submitted their response. Please complete the QC review.
+        {intro_text}
     </p>
 
     <!-- INFO TABLE -->
@@ -1876,7 +2047,7 @@ def send_qcr_assignment_email(item_id):
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:16px;">
         <tr>
             <td colspan="2" style="background:#d5f5e3; font-weight:bold; border:1px solid #82e0aa; color:#1e8449;">
-                ✅ Reviewer's Submitted Response
+                ✅ Reviewer's Submitted Response (v{current_version})
             </td>
         </tr>
 
@@ -1900,6 +2071,8 @@ def send_qcr_assignment_email(item_id):
             <td style="border:1px solid #ddd;">{reviewer_response_time}</td>
         </tr>
     </table>
+
+    {version_history_html}
 
     <!-- FILE PATH SECTION -->
     <div style="margin-top:18px;">
@@ -1975,6 +2148,147 @@ def send_qcr_assignment_email(item_id):
         return {'success': False, 'error': str(e)}
 
 
+def send_qcr_version_update_email(item_id, version):
+    """Send an email to QCR notifying them of an updated reviewer response (before QCR has responded)."""
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item with reviewer info
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['qcr_email']:
+        conn.close()
+        return {'success': False, 'error': 'No QCR assigned'}
+    
+    # Get existing QCR token
+    token = item['email_token_qcr']
+    if not token:
+        token = generate_token()
+        cursor.execute('UPDATE item SET email_token_qcr = ? WHERE id = ?', (token, item_id))
+        conn.commit()
+    
+    respond_url = f"{get_app_host()}/respond/qcr?token={token}"
+    
+    # Get version history
+    cursor.execute('''
+        SELECT version, submitted_at 
+        FROM reviewer_response_history 
+        WHERE item_id = ? 
+        ORDER BY version DESC
+        LIMIT 5
+    ''', (item_id,))
+    history = cursor.fetchall()
+    version_history_html = ''
+    if history:
+        history_parts = [f"v{h['version']} ({h['submitted_at'][:16].replace('T', ' ')})" for h in history]
+        version_history_html = f"<p><strong>Previous versions:</strong> {', '.join(history_parts)}</p>"
+    
+    conn.close()
+    
+    # Format reviewer notes
+    reviewer_notes_html = (item['reviewer_notes'] or 'No notes provided').replace('\n', '<br>')
+    
+    # Format files
+    reviewer_files_display = 'None selected'
+    if item['reviewer_selected_files']:
+        try:
+            files = json.loads(item['reviewer_selected_files'])
+            if files:
+                reviewer_files_display = '<br>'.join([f"• {f}" for f in files])
+        except:
+            pass
+    
+    subject = f"[LEB] {item['type']} {item['identifier']} – Reviewer response updated (v{version})"
+    
+    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['type']} {item['identifier']} – Reviewer Response Updated
+    </h2>
+
+    <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 15px; margin: 15px 0;">
+        <p style="margin: 0; color: #92400e;">
+            <strong>📝 Update Notice:</strong> The Initial Reviewer has updated their response to <strong>version {version}</strong>.
+        </p>
+    </div>
+
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#d5f5e3; font-weight:bold; border:1px solid #82e0aa; color:#1e8449;">
+                ✅ Updated Reviewer Response (v{version})
+            </td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Category</td>
+            <td style="border:1px solid #ddd; color:#1e8449; font-weight:bold;">{item['reviewer_response_category'] or 'Not specified'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Selected Files</td>
+            <td style="border:1px solid #ddd;">{reviewer_files_display}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Notes</td>
+            <td style="border:1px solid #ddd;">{reviewer_notes_html}</td>
+        </tr>
+    </table>
+
+    {version_history_html}
+
+    <p style="margin-top: 15px;">The QC Review form will always show the <strong>latest version</strong> of the reviewer's response.</p>
+
+    <div style="margin-top:22px; text-align:left;">
+        <a href="{respond_url}"
+           style="background:#27ae60; color:white; padding:10px 18px; 
+                  font-size:15px; text-decoration:none; border-radius:4px; display:inline-block;">
+            Open QC Review Form
+        </a>
+    </div>
+
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            mail.To = item['qcr_email']
+            if item['reviewer_email']:
+                mail.CC = item['reviewer_email']
+            mail.Subject = subject
+            mail.HTMLBody = html_body
+            mail.Send()
+        finally:
+            pythoncom.CoUninitialize()
+        
+        return {'success': True, 'message': 'Version update email sent'}
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
 def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_category=None, final_text=None):
     """Send notification email to reviewer based on QCR action."""
     if not HAS_WIN32COM:
@@ -1994,28 +2308,32 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
         WHERE i.id = ?
     ''', (item_id,))
     item = cursor.fetchone()
-    conn.close()
     
     if not item:
+        conn.close()
         return {'success': False, 'error': 'Item not found'}
     
     if not item['reviewer_email']:
+        conn.close()
         return {'success': False, 'error': 'No reviewer email'}
+    
+    # Get version info
+    version = item['reviewer_response_version'] or 1
     
     # Build email based on action
     if qc_action == 'Approve':
-        subject = f"[LEB] {item['type']} {item['identifier']} – Your response was approved"
-        body_intro = f"""<p>Good news! Your response for the following item has been <strong style="color: #059669;">approved</strong> by QC.</p>"""
+        subject = f"[LEB] {item['type']} {item['identifier']} – Your response (v{version}) was approved"
+        body_intro = f"""<p>Good news! Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #059669;">approved</strong> by QC.</p>"""
         action_color = '#059669'
         action_icon = '✅'
     elif qc_action == 'Modify':
-        subject = f"[LEB] {item['type']} {item['identifier']} – Your response was modified by QC"
-        body_intro = f"""<p>Your response for the following item has been <strong style="color: #2563eb;">modified</strong> by QC and is now finalized.</p>"""
+        subject = f"[LEB] {item['type']} {item['identifier']} – Your response (v{version}) was modified by QC"
+        body_intro = f"""<p>Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #2563eb;">modified</strong> by QC and is now finalized.</p>"""
         action_color = '#2563eb'
         action_icon = '✏️'
     else:  # Send Back
-        subject = f"[LEB] {item['type']} {item['identifier']} – Revisions requested by QC"
-        body_intro = f"""<p>Your response for the following item has been <strong style="color: #dc2626;">returned</strong> for revision by QC.</p>"""
+        subject = f"[LEB] {item['type']} {item['identifier']} – Revisions requested on v{version}"
+        body_intro = f"""<p>Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #dc2626;">returned</strong> for revision by QC.</p>"""
         action_color = '#dc2626'
         action_icon = '↩️'
     
@@ -2028,7 +2346,7 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
         original_text = item['reviewer_response_text'] or item['reviewer_notes'] or 'No original text'
         response_comparison = f"""
         <div style="margin: 20px 0;">
-            <h4 style="margin: 0 0 10px 0;">Your Original Response:</h4>
+            <h4 style="margin: 0 0 10px 0;">Your Original Response (v{version}):</h4>
             <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                 {original_text.replace(chr(10), '<br>')}
             </div>
@@ -2045,18 +2363,17 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
     if qc_action == 'Send Back':
         # Generate new token for revision
         new_token = generate_token()
-        conn = get_db()
-        cursor = conn.cursor()
         cursor.execute('UPDATE item SET email_token_reviewer = ? WHERE id = ?', (new_token, item_id))
         conn.commit()
-        conn.close()
         
         respond_url = f"{get_app_host()}/respond/reviewer?token={new_token}"
         revision_link = f"""
         <p style="margin: 20px 0;">
-            <a href="{respond_url}" style="display: inline-block; background: #dc2626; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">📝 Revise Your Response</a>
+            <a href="{respond_url}" style="display: inline-block; background: #dc2626; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">📝 Revise Your Response (Submit v{version + 1})</a>
         </p>
         """
+    
+    conn.close()
     
     html_body = f"""<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">
 <p>Hello {item['reviewer_name'] or 'Reviewer'},</p>
@@ -2069,10 +2386,12 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Due Date:</td><td>{item['due_date'] or 'N/A'}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Priority:</td><td>{item['priority'] or 'Normal'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Response Version:</td><td>v{version}</td></tr>
 </table>
 
 <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin: 20px 0;">
 <h3 style="margin: 0 0 10px 0; color: {action_color};">{action_icon} QC Decision: {qc_action}</h3>
+<p style="font-size: 12px; color: #666; margin-bottom: 10px;">Feedback on your v{version} response</p>
 {f'<p><strong>Final Category:</strong> {final_category}</p>' if final_category else ''}
 <p><strong>QC Notes:</strong></p>
 <div style="background: white; border-radius: 4px; padding: 10px; margin-top: 8px;">
@@ -3120,17 +3439,76 @@ def respond_reviewer_form():
         WHERE i.email_token_reviewer = ?
     ''', (token,))
     item = cursor.fetchone()
-    conn.close()
     
     if not item:
+        conn.close()
         return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
     
-    # Check if already responded
-    if item['reviewer_response_at']:
-        return render_template_string(ALREADY_RESPONDED_TEMPLATE, 
-            item=dict(item),
-            response_type='reviewer'
-        )
+    item_dict = dict(item)
+    
+    # Check if item is closed
+    is_closed = item['status'] == 'Closed'
+    
+    # Determine if submission is allowed
+    # Allowed when: NOT closed AND (QCR hasn't responded yet OR QCR sent it back)
+    can_submit = False
+    is_resubmit = False
+    qcr_feedback = None
+    
+    if not is_closed:
+        qcr_action = item['qcr_action']
+        qcr_response_at = item['qcr_response_at']
+        
+        # Case 1: QCR hasn't responded yet - always allow
+        if not qcr_response_at or item['qcr_response_status'] in ['Not Sent', 'Email Sent', 'Waiting for Revision']:
+            can_submit = True
+            # It's a resubmit if reviewer already responded before
+            if item['reviewer_response_at']:
+                is_resubmit = True
+        
+        # Case 2: QCR sent it back - allow resubmit
+        if qcr_action == 'Send Back':
+            can_submit = True
+            is_resubmit = True
+            qcr_feedback = item['qcr_notes']
+        
+        # Case 3: QCR approved/modified - don't allow (finalized)
+        if qcr_action in ['Approve', 'Modify'] and item['status'] == 'Ready for Response':
+            can_submit = False
+    
+    # Get current version info
+    current_version = item['reviewer_response_version'] or 1
+    next_version = current_version + 1 if is_resubmit else current_version
+    
+    # Get previous response for pre-fill
+    previous_response = None
+    previous_files = []
+    if is_resubmit and item['reviewer_response_at']:
+        previous_response = {
+            'category': item['reviewer_response_category'],
+            'text': item['reviewer_notes'] or item['reviewer_response_text'],
+            'files': item['reviewer_selected_files']
+        }
+        if item['reviewer_selected_files']:
+            try:
+                previous_files = json.loads(item['reviewer_selected_files'])
+            except:
+                pass
+    
+    # Get version history
+    version_history = ''
+    cursor.execute('''
+        SELECT version, submitted_at 
+        FROM reviewer_response_history 
+        WHERE item_id = ? 
+        ORDER BY version DESC
+    ''', (item['id'],))
+    history = cursor.fetchall()
+    if history:
+        version_parts = [f"v{h['version']} ({h['submitted_at'][:16].replace('T', ' ')})" for h in history]
+        version_history = ', '.join(version_parts)
+    
+    conn.close()
     
     # Get files in folder
     files = []
@@ -3143,67 +3521,176 @@ def respond_reviewer_form():
             pass
     
     return render_template_string(REVIEWER_RESPONSE_TEMPLATE, 
-        item=dict(item),
+        item=item_dict,
         files=files,
-        token=token
+        token=token,
+        version=next_version,
+        is_closed=is_closed,
+        can_submit=can_submit,
+        is_resubmit=is_resubmit,
+        qcr_feedback=qcr_feedback,
+        previous_response=previous_response,
+        previous_files=previous_files,
+        version_history=version_history
     )
 
 @app.route('/respond/reviewer', methods=['POST'])
 def respond_reviewer_submit():
-    """Handle reviewer response submission."""
+    """Handle reviewer response submission with version tracking."""
     token = request.form.get('token')
     if not token:
         return render_template_string(ERROR_PAGE_TEMPLATE, error='Missing token'), 400
     
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM item WHERE email_token_reviewer = ?', (token,))
+    cursor.execute('''
+        SELECT i.*, ir.id as reviewer_user_id
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        WHERE i.email_token_reviewer = ?
+    ''', (token,))
     item = cursor.fetchone()
     
     if not item:
         conn.close()
         return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
     
-    # Check if already responded
-    if item['reviewer_response_at']:
+    item_id = item['id']
+    
+    # Check if item is closed - block all submissions
+    if item['status'] == 'Closed':
         conn.close()
-        return render_template_string(ALREADY_RESPONDED_TEMPLATE, 
-            item=dict(item),
-            response_type='reviewer'
-        )
+        return render_template_string(ERROR_PAGE_TEMPLATE, 
+            error='This item has been closed. No further changes can be submitted. Contact the project administrator if this is unexpected.'), 403
+    
+    # Check if submission is allowed
+    qcr_action = item['qcr_action']
+    qcr_response_at = item['qcr_response_at']
+    
+    # Determine if this is a valid submission scenario
+    can_submit = False
+    is_resubmit = False
+    
+    # Case 1: QCR hasn't responded yet - always allow
+    if not qcr_response_at or item['qcr_response_status'] in ['Not Sent', 'Email Sent', 'Waiting for Revision']:
+        can_submit = True
+        if item['reviewer_response_at']:
+            is_resubmit = True
+    
+    # Case 2: QCR sent it back - allow resubmit
+    if qcr_action == 'Send Back':
+        can_submit = True
+        is_resubmit = True
+    
+    # Case 3: QCR approved/modified - don't allow (finalized)
+    if qcr_action in ['Approve', 'Modify'] and item['status'] == 'Ready for Response':
+        can_submit = False
+    
+    if not can_submit:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, 
+            error='This item has already been finalized in QC. Please contact the project admin if additional changes are required.'), 403
     
     # Get form data
     response_category = request.form.get('response_category')
     notes = request.form.get('notes', '')
     selected_files = request.form.getlist('selected_files')
     
-    # Update item
-    cursor.execute('''
-        UPDATE item SET
-            reviewer_response_at = ?,
-            reviewer_response_status = 'Responded',
-            reviewer_response_category = ?,
-            reviewer_notes = ?,
-            reviewer_selected_files = ?,
-            status = 'In QC'
-        WHERE id = ?
-    ''', (
-        datetime.now().isoformat(),
-        response_category,
-        notes,
-        json.dumps(selected_files),
-        item['id']
-    ))
+    # Calculate new version
+    current_version = item['reviewer_response_version'] or 0
+    new_version = current_version + 1
+    
+    # Store current response in history before updating (if this is a resubmit)
+    if is_resubmit and item['reviewer_response_at']:
+        cursor.execute('''
+            INSERT INTO reviewer_response_history 
+            (item_id, version, submitted_at, response_category, response_text, response_files, submitted_by_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            item_id,
+            current_version,
+            item['reviewer_response_at'],
+            item['reviewer_response_category'],
+            item['reviewer_notes'] or item['reviewer_response_text'],
+            item['reviewer_selected_files'],
+            item['reviewer_user_id']
+        ))
+    
+    # Determine new status based on whether QCR sent it back
+    if qcr_action == 'Send Back':
+        # Reset QCR state for new review cycle
+        cursor.execute('''
+            UPDATE item SET
+                reviewer_response_at = ?,
+                reviewer_response_status = 'Responded',
+                reviewer_response_category = ?,
+                reviewer_notes = ?,
+                reviewer_selected_files = ?,
+                reviewer_response_version = ?,
+                status = 'In QC',
+                qcr_action = NULL,
+                qcr_response_at = NULL,
+                qcr_response_status = 'Not Sent',
+                qcr_notes = NULL,
+                qcr_response_category = NULL,
+                qcr_response_text = NULL,
+                qcr_response_mode = NULL
+            WHERE id = ?
+        ''', (
+            datetime.now().isoformat(),
+            response_category,
+            notes,
+            json.dumps(selected_files),
+            new_version,
+            item_id
+        ))
+    else:
+        # Standard update
+        cursor.execute('''
+            UPDATE item SET
+                reviewer_response_at = ?,
+                reviewer_response_status = 'Responded',
+                reviewer_response_category = ?,
+                reviewer_notes = ?,
+                reviewer_selected_files = ?,
+                reviewer_response_version = ?,
+                status = 'In QC'
+            WHERE id = ?
+        ''', (
+            datetime.now().isoformat(),
+            response_category,
+            notes,
+            json.dumps(selected_files),
+            new_version,
+            item_id
+        ))
+    
     conn.commit()
     conn.close()
     
-    # Automatically send QCR email
-    send_qcr_assignment_email(item['id'])
+    # Send appropriate notifications
+    if is_resubmit:
+        # Send version update notification to QCR
+        if qcr_action == 'Send Back':
+            # Full new QCR assignment email for revision after send-back
+            send_qcr_assignment_email(item_id, is_revision=True, version=new_version)
+        else:
+            # Just an update notification (QCR hasn't responded yet)
+            send_qcr_version_update_email(item_id, new_version)
+    else:
+        # First submission - send QCR assignment
+        send_qcr_assignment_email(item_id)
     
-    return render_template_string(SUCCESS_TEMPLATE, 
-        message='Your review has been submitted successfully!',
-        details='The QC Reviewer has been notified and will complete the final review.'
-    )
+    if is_resubmit:
+        return render_template_string(SUCCESS_TEMPLATE, 
+            message=f'Your revised response (v{new_version}) has been submitted!',
+            details='The QC Reviewer has been notified of your updated response.'
+        )
+    else:
+        return render_template_string(SUCCESS_TEMPLATE, 
+            message='Your review has been submitted successfully!',
+            details='The QC Reviewer has been notified and will complete the final review.'
+        )
 
 @app.route('/respond/qcr', methods=['GET'])
 def respond_qcr_form():
@@ -3224,17 +3711,35 @@ def respond_qcr_form():
         WHERE i.email_token_qcr = ?
     ''', (token,))
     item = cursor.fetchone()
-    conn.close()
     
     if not item:
+        conn.close()
         return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    # Check if item is closed
+    if item['status'] == 'Closed':
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, 
+            error='This item has been closed. No further changes can be submitted. Contact the project administrator if this is unexpected.'), 403
     
     # Check if already responded
     if item['qcr_response_at']:
+        conn.close()
         return render_template_string(ALREADY_RESPONDED_TEMPLATE, 
             item=dict(item),
             response_type='qcr'
         )
+    
+    # Get version history
+    cursor.execute('''
+        SELECT version, submitted_at, response_category
+        FROM reviewer_response_history 
+        WHERE item_id = ? 
+        ORDER BY version DESC
+        LIMIT 5
+    ''', (item['id'],))
+    version_history = cursor.fetchall()
+    conn.close()
     
     # Get files in folder
     files = []
@@ -3254,11 +3759,16 @@ def respond_qcr_form():
         except:
             pass
     
+    # Get version info
+    current_version = item['reviewer_response_version'] or 1
+    
     return render_template_string(QCR_RESPONSE_TEMPLATE, 
         item=dict(item),
         files=files,
         reviewer_files=reviewer_files,
-        token=token
+        token=token,
+        version=current_version,
+        version_history=[dict(v) for v in version_history] if version_history else []
     )
 
 @app.route('/respond/qcr', methods=['POST'])
@@ -3276,6 +3786,12 @@ def respond_qcr_submit():
     if not item:
         conn.close()
         return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    # Check if item is closed - block all submissions
+    if item['status'] == 'Closed':
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, 
+            error='This item has been closed. No further changes can be submitted. Contact the project administrator if this is unexpected.'), 403
     
     # Check if already responded
     if item['qcr_response_at']:
