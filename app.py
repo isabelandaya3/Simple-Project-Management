@@ -97,7 +97,7 @@ PRIORITY_MIN_DAYS = {
 }
 
 # QCR requires at least this many work days before contractor due date
-QCR_DAYS_BEFORE_DUE = 3
+QCR_DAYS_BEFORE_DUE = 1
 
 # =============================================================================
 # WORKDAY HELPER FUNCTIONS
@@ -207,19 +207,25 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     # Check if window is insufficient
     is_insufficient = contractor_window_days < required_days
     
-    # Calculate QCR due date (3 business days before contractor due date)
+    # Calculate QCR due date (1 business day before contractor due date)
     qcr_due_date = subtract_business_days(contractor_due_date, QCR_DAYS_BEFORE_DUE)
     
-    # Calculate Initial Reviewer due date based on ACTUAL available time, not required time
-    # Available window for Initial Reviewer = total days - QCR days
-    available_for_reviewer = max(contractor_window_days - QCR_DAYS_BEFORE_DUE, 1)
+    # Calculate Initial Reviewer due date
+    # They should have time before QCR needs to review
+    # Available window for Initial Reviewer = total days - QCR days (at least 1)
+    available_for_reviewer = max(contractor_window_days - QCR_DAYS_BEFORE_DUE - 1, 1)
     
     # Initial Reviewer due date = date_received + available reviewer days
     initial_reviewer_due_date = add_business_days(date_received, available_for_reviewer)
     
-    # Ensure reviewer due date doesn't exceed QCR due date
-    if initial_reviewer_due_date > qcr_due_date:
-        initial_reviewer_due_date = qcr_due_date
+    # Ensure reviewer due date is at least 1 day before QCR due date
+    max_reviewer_due = subtract_business_days(qcr_due_date, 1)
+    if initial_reviewer_due_date > max_reviewer_due:
+        initial_reviewer_due_date = max_reviewer_due
+    
+    # Ensure reviewer due date is not before date_received
+    if initial_reviewer_due_date < date_received:
+        initial_reviewer_due_date = date_received
     
     return {
         'initial_reviewer_due_date': initial_reviewer_due_date.strftime('%Y-%m-%d'),
