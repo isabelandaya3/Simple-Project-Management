@@ -210,14 +210,16 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     # Calculate QCR due date (3 business days before contractor due date)
     qcr_due_date = subtract_business_days(contractor_due_date, QCR_DAYS_BEFORE_DUE)
     
-    # Calculate Initial Reviewer due date
-    # Reserve QCR_DAYS_BEFORE_DUE for QCR, rest for Initial Reviewer
-    review_window_days = max(required_days - QCR_DAYS_BEFORE_DUE, 1)
-    initial_reviewer_due_date = subtract_business_days(qcr_due_date, review_window_days)
+    # Calculate Initial Reviewer due date based on ACTUAL available time, not required time
+    # Available window for Initial Reviewer = total days - QCR days
+    available_for_reviewer = max(contractor_window_days - QCR_DAYS_BEFORE_DUE, 1)
     
-    # Clamp to not be before date_received
-    if initial_reviewer_due_date < date_received:
-        initial_reviewer_due_date = date_received
+    # Initial Reviewer due date = date_received + available reviewer days
+    initial_reviewer_due_date = add_business_days(date_received, available_for_reviewer)
+    
+    # Ensure reviewer due date doesn't exceed QCR due date
+    if initial_reviewer_due_date > qcr_due_date:
+        initial_reviewer_due_date = qcr_due_date
     
     return {
         'initial_reviewer_due_date': initial_reviewer_due_date.strftime('%Y-%m-%d'),
@@ -1179,13 +1181,13 @@ def init_db():
         WHERE date_received IS NULL AND created_at IS NOT NULL
     ''')
     
-    # Recalculate review due dates for items that have date_received and due_date but missing calculated dates
+    # Recalculate review due dates for ALL items that have date_received and due_date
+    # This ensures the calculation is always correct with the latest logic
     cursor.execute('''
         SELECT id, date_received, due_date, priority 
         FROM item 
         WHERE date_received IS NOT NULL 
-        AND due_date IS NOT NULL 
-        AND (initial_reviewer_due_date IS NULL OR qcr_due_date IS NULL)
+        AND due_date IS NOT NULL
     ''')
     items_to_update = cursor.fetchall()
     for item_id, date_received, due_date, priority in items_to_update:
