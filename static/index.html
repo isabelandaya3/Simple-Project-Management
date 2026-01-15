@@ -151,10 +151,15 @@
                     </div>
                 </div>
                 <div class="header-right">
-                    <label class="toggle-label" id="show-closed-toggle">
-                        <input type="checkbox" id="show-closed-checkbox">
-                        <span>Show Closed</span>
-                    </label>
+                    <button class="btn btn-outline" id="btn-select-mode" title="Select multiple items to delete">
+                        ☐ Select Items
+                    </button>
+                    <button class="btn btn-danger hidden" id="btn-delete-selected" disabled style="background:#dc3545; border-color:#dc3545;">
+                        🗑️ Delete Selected (0)
+                    </button>
+                    <button class="btn btn-outline hidden" id="btn-cancel-select">
+                        ✕ Cancel
+                    </button>
                     <button class="btn btn-primary" id="btn-new-item">
                         <span>+</span> New Item
                     </button>
@@ -449,6 +454,11 @@
                     <button class="btn btn-success btn-full" id="btn-close-item">✅ Close Out Item</button>
                     <button class="btn btn-warning btn-full hidden" id="btn-reopen-item">🔄 Undo Closeout (Admin)</button>
                     <p id="closed-at-info" class="text-muted text-center hidden"></p>
+                </div>
+                
+                <!-- Delete Item (Admin) -->
+                <div class="drawer-section">
+                    <button class="btn btn-danger btn-full" id="btn-delete-item" style="background:#dc3545; border-color:#dc3545;">🗑️ Delete Item</button>
                 </div>
 
                 <!-- Comments -->

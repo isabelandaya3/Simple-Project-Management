@@ -49,6 +49,14 @@ except ImportError:
     print("WARNING: winotify not installed. System notifications will be disabled.")
     print("Install with: pip install winotify")
 
+# Optional: Airtable integration for offline form submission
+try:
+    from airtable_integration import get_airtable_form_url, sync_airtable_responses, load_airtable_config
+    HAS_AIRTABLE = True
+except ImportError:
+    HAS_AIRTABLE = False
+    print("INFO: Airtable integration not available.")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -99,8 +107,8 @@ PRIORITY_MIN_DAYS = {
 # QCR requires at least this many work days before contractor due date
 QCR_DAYS_BEFORE_DUE = 1
 
-# QCR needs this many days to complete their review
-QCR_REVIEW_DAYS = 3
+# QCR needs this many days to complete their review (interval between Reviewer due and QCR due)
+QCR_REVIEW_DAYS = 2
 
 # =============================================================================
 # WORKDAY HELPER FUNCTIONS
@@ -1242,8 +1250,9 @@ def init_db():
             pass
     
     # Add reviewer_response_version column for version tracking
+    # First submission is v0, revisions are v1, v2, etc.
     try:
-        cursor.execute('ALTER TABLE item ADD COLUMN reviewer_response_version INTEGER DEFAULT 1')
+        cursor.execute('ALTER TABLE item ADD COLUMN reviewer_response_version INTEGER DEFAULT 0')
     except:
         pass
     
@@ -1268,6 +1277,16 @@ def init_db():
             FOREIGN KEY (submitted_by_user_id) REFERENCES user(id)
         )
     ''')
+    
+    # Add missing columns to reviewer_response_history if they don't exist
+    try:
+        cursor.execute('ALTER TABLE reviewer_response_history ADD COLUMN notes TEXT')
+    except:
+        pass
+    try:
+        cursor.execute('ALTER TABLE reviewer_response_history ADD COLUMN selected_files TEXT')
+    except:
+        pass
     
     # Notification table
     cursor.execute('''
@@ -1380,12 +1399,51 @@ def parse_identifier(subject, item_type):
     return None
 
 def parse_title(subject, identifier, body=None):
-    """Extract a title from the email body (Spec Section) or subject."""
+    """Extract a title from the email body (full item name, NOT Spec Section)."""
     title = None
     
-    # First, try to get Spec Section from body (this is the best title)
     if body:
-        # ACC format: "Spec Section    25 00 00 - INTEGRATED AUTOMATION"
+        # First, try to get the FULL item title from ACC email body
+        # ACC format in item link: "item #23 00 00-1 LEB1,2,10_230000_MOFE_Modular Central Utility Plant_Product Data & Drawings_Mech Yard"
+        # We want the full title, NOT just the Spec Section
+        
+        # Extract just the number portion of the identifier (e.g., "23 00 00-1" from "Submittal #23 00 00-1")
+        id_number = identifier
+        if identifier:
+            id_match = re.search(r'#(.+)$', identifier)
+            if id_match:
+                id_number = id_match.group(1).strip()
+        
+        if id_number:
+            # Pattern 1: Look for "item #23 00 00-1 TITLE" in email body
+            # Title starts after identifier and includes everything up to "What's changed" or newline
+            item_pattern = rf'item\s*#?\s*{re.escape(id_number)}\s+([^\n\r]+?)(?:\s*What|\s*$)'
+            item_match = re.search(item_pattern, body, re.IGNORECASE)
+            if item_match:
+                title = item_match.group(1).strip()
+                # Remove any leading code prefix like "LEB1,2,10_230000_"
+                title = re.sub(r'^[A-Z0-9,]+_\d+_', '', title)
+                if title:
+                    return title
+        
+        # Pattern 2: Look for "Title" field in ACC emails
+        title_match = re.search(r'(?:^|\n)\s*Title[:\s\t]+([^\n\r]+)', body, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+            if title and len(title) > 5:  # Make sure it's substantial
+                return title
+        
+        # Pattern 3: Submittal/RFI with full title  
+        if id_number:
+            submittal_pattern = rf'(?:Submittal|RFI)\s*#?\s*{re.escape(id_number)}\s+([^\n\r]+?)(?:\s*What|\s*$)'
+            submittal_match = re.search(submittal_pattern, body, re.IGNORECASE)
+            if submittal_match:
+                title = submittal_match.group(1).strip()
+                title = re.sub(r'^[A-Z0-9,]+_\d+_', '', title)
+                if title:
+                    return title
+        
+        # Fallback: Use Spec Section if nothing else found
         spec_match = re.search(r'Spec\s*Section[:\s\t]+([^\n\r]+)', body, re.IGNORECASE)
         if spec_match:
             title = spec_match.group(1).strip()
@@ -1493,7 +1551,7 @@ def create_item_folder(item_type, identifier, bucket, title=None):
     clean_id = sanitize_folder_name(identifier)
     folder_id = clean_id.replace(f'{item_type} #', '')
     if title:
-        clean_title = sanitize_folder_name(title)[:50]  # Limit title length
+        clean_title = sanitize_folder_name(title)[:100]  # Limit title length to 100 chars
         item_folder = f"{item_type} - {folder_id} - {clean_title}"
     else:
         item_folder = f"{item_type} - {folder_id}"
@@ -1507,6 +1565,517 @@ def create_item_folder(item_type, identifier, bucket, title=None):
     except Exception as e:
         print(f"Error creating folder {full_path}: {e}")
         return None
+
+# =============================================================================
+# FILE-BASED RESPONSE FORMS
+# =============================================================================
+
+TEMPLATES_DIR = BASE_DIR / "templates"
+
+def generate_reviewer_form_html(item_id):
+    """Generate a self-contained HTML form for reviewer response and save it to the item folder."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT i.*, 
+               ir.display_name as reviewer_name, ir.email as reviewer_email,
+               qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['folder_link']:
+        conn.close()
+        return {'success': False, 'error': 'Item has no folder assigned'}
+    
+    # Generate token if not exists
+    token = item['email_token_reviewer']
+    if not token:
+        token = generate_token()
+        cursor.execute('UPDATE item SET email_token_reviewer = ? WHERE id = ?', (token, item_id))
+        conn.commit()
+    
+    # Calculate due dates
+    reviewer_due = item['initial_reviewer_due_date'] or 'N/A'
+    qcr_due = item['qcr_due_date'] or 'N/A'
+    
+    conn.close()
+    
+    # Note: We no longer pre-populate files - HTA will scan the folder
+    folder_files = []  # Empty - HTA loads files from folder directly
+    
+    # Load template (use HTA template for automatic file saving)
+    template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
+    if not template_path.exists():
+        # Fallback to HTML templates
+        template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
+        if not template_path.exists():
+            template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v2.html"
+            if not template_path.exists():
+                template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE.html"
+                if not template_path.exists():
+                    return {'success': False, 'error': 'Reviewer form template not found'}
+    
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
+    
+    # Escape special characters for JavaScript embedding
+    def js_escape(s):
+        if not s:
+            return ''
+        return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
+    
+    # Create folder path URL for file:// link
+    folder_path_url = str(item['folder_link']).replace('\\', '/')
+    
+    # Replace placeholders
+    html = template.replace('{{ITEM_ID}}', str(item['id']))
+    html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
+    html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
+    html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{REVIEWER_DUE_DATE}}', reviewer_due)
+    html = html.replace('{{QCR_DUE_DATE}}', qcr_due)
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{REVIEWER_NAME}}', js_escape(item['reviewer_name']) or 'N/A')
+    html = html.replace('{{REVIEWER_EMAIL}}', item['reviewer_email'] or '')
+    html = html.replace('{{TOKEN}}', token)
+    html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{FOLDER_PATH_URL}}', folder_path_url)
+    html = html.replace('{{FOLDER_FILES_JSON}}', json.dumps(folder_files))
+    
+    # Save to Responses subfolder (use .hta extension if HTA template, else .html)
+    folder_path = Path(item['folder_link'])
+    responses_folder = folder_path / "Responses"
+    
+    # Create Responses subfolder if it doesn't exist
+    try:
+        responses_folder.mkdir(exist_ok=True)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to create Responses folder: {e}'}
+    
+    if template_path.suffix == '.hta':
+        form_path = responses_folder / "_RESPONSE_FORM.hta"
+    else:
+        form_path = responses_folder / "_RESPONSE_FORM.html"
+    
+    try:
+        with open(form_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        return {'success': True, 'path': str(form_path)}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to save form: {e}'}
+
+
+def generate_qcr_form_html(item_id):
+    """Generate a self-contained HTML form for QCR response and save it to the item folder."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT i.*, 
+               ir.display_name as reviewer_name, ir.email as reviewer_email,
+               qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['folder_link']:
+        conn.close()
+        return {'success': False, 'error': 'Item has no folder assigned'}
+    
+    # Generate token if not exists
+    token = item['email_token_qcr']
+    if not token:
+        token = generate_token()
+        cursor.execute('UPDATE item SET email_token_qcr = ? WHERE id = ?', (token, item_id))
+        conn.commit()
+    
+    # Parse reviewer selected files
+    reviewer_files = []
+    if item['reviewer_selected_files']:
+        try:
+            reviewer_files = json.loads(item['reviewer_selected_files'])
+        except:
+            pass
+    
+    conn.close()
+    
+    # Load template (use HTA template for automatic file saving)
+    template_path = TEMPLATES_DIR / "_QCR_FORM_TEMPLATE_v3.hta"
+    if not template_path.exists():
+        # Fall back to HTML templates
+        template_path = TEMPLATES_DIR / "_QCR_FORM_TEMPLATE_v2.html"
+        if not template_path.exists():
+            template_path = TEMPLATES_DIR / "_QCR_FORM_TEMPLATE.html"
+            if not template_path.exists():
+                return {'success': False, 'error': 'QCR form template not found'}
+    
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
+    
+    # Escape special characters for JavaScript embedding
+    def js_escape(s):
+        if not s:
+            return ''
+        return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+    
+    # Format reviewer selected files as HTML list items
+    reviewer_files_html = ''
+    reviewer_files_text = 'None selected'
+    reviewer_files_js = ''
+    if reviewer_files:
+        for f in reviewer_files:
+            reviewer_files_html += f'<li>{f}</li>'
+        reviewer_files_text = '; '.join(reviewer_files)
+        reviewer_files_js = ', '.join([f'"{js_escape(f)}"' for f in reviewer_files])
+    else:
+        reviewer_files_html = '<li><em>None selected</em></li>'
+    
+    # Get response version
+    response_version = item['reviewer_response_version'] if item['reviewer_response_version'] else 1
+    
+    # Replace placeholders
+    html = template.replace('{{ITEM_ID}}', str(item['id']))
+    html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
+    html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
+    html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{PRIORITY}}', item['priority'] or 'Normal')
+    html = html.replace('{{REVIEWER_NAME}}', js_escape(item['reviewer_name']) or 'N/A')
+    html = html.replace('{{QCR_NAME}}', js_escape(item['qcr_name']) or 'N/A')
+    html = html.replace('{{QCR_EMAIL}}', item['qcr_email'] or '')
+    html = html.replace('{{TOKEN}}', token)
+    html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{REVIEWER_RESPONSE_CATEGORY}}', item['reviewer_response_category'] or 'Not specified')
+    html = html.replace('{{REVIEWER_NOTES}}', js_escape(item['reviewer_notes'] or item['reviewer_response_text'] or 'No notes provided'))
+    html = html.replace('{{REVIEWER_SELECTED_FILES}}', reviewer_files_html)
+    html = html.replace('{{REVIEWER_SELECTED_FILES_TEXT}}', reviewer_files_text)
+    html = html.replace('{{REVIEWER_SELECTED_FILES_JS}}', reviewer_files_js)
+    html = html.replace('{{RESPONSE_VERSION}}', str(response_version))
+    
+    # Save to Responses subfolder (use .hta extension if HTA template, else .html)
+    folder_path = Path(item['folder_link'])
+    responses_folder = folder_path / "Responses"
+    
+    # Create Responses subfolder if it doesn't exist
+    try:
+        responses_folder.mkdir(exist_ok=True)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to create Responses folder: {e}'}
+    
+    if template_path.suffix == '.hta':
+        form_path = responses_folder / "_QCR_RESPONSE_FORM.hta"
+    else:
+        form_path = responses_folder / "_QCR_FORM.html"
+    
+    try:
+        with open(form_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        return {'success': True, 'path': str(form_path)}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to save form: {e}'}
+
+
+def process_reviewer_response_json(json_path):
+    """Process a _reviewer_response.json file and import it into the database."""
+    try:
+        with open(json_path, 'r', encoding='utf-8-sig') as f:
+            data = json.load(f)
+        
+        # Validate it's the right type
+        if data.get('_form_type') != 'reviewer_response':
+            return {'success': False, 'error': 'Invalid form type'}
+        
+        token = data.get('token')
+        if not token:
+            return {'success': False, 'error': 'Missing token'}
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Find item by token
+        cursor.execute('SELECT id, reviewer_response_version FROM item WHERE email_token_reviewer = ?', (token,))
+        item = cursor.fetchone()
+        
+        if not item:
+            conn.close()
+            return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        item_id = item['id']
+        current_version = item['reviewer_response_version'] or 0
+        
+        # Save to history if there's an existing response
+        cursor.execute('SELECT reviewer_response_at FROM item WHERE id = ?', (item_id,))
+        existing = cursor.fetchone()
+        if existing and existing['reviewer_response_at']:
+            cursor.execute('''
+                INSERT INTO reviewer_response_history 
+                (item_id, version, response_category, response_text, notes, selected_files, submitted_at)
+                SELECT id, reviewer_response_version, reviewer_response_category, 
+                       reviewer_response_text, reviewer_notes, reviewer_selected_files, reviewer_response_at
+                FROM item WHERE id = ?
+            ''', (item_id,))
+            current_version += 1
+        
+        # Update item with new response
+        selected_files_json = json.dumps(data.get('selected_files', []))
+        cursor.execute('''
+            UPDATE item SET
+                reviewer_response_category = ?,
+                reviewer_notes = ?,
+                reviewer_selected_files = ?,
+                reviewer_response_at = ?,
+                reviewer_response_status = 'Responded',
+                reviewer_response_version = ?
+            WHERE id = ?
+        ''', (
+            data.get('response_category'),
+            data.get('notes'),
+            selected_files_json,
+            data.get('_submitted_at', datetime.now().isoformat()),
+            current_version,
+            item_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Rename processed file
+        processed_path = json_path.parent / f"_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        json_path.rename(processed_path)
+        
+        # Send QCR assignment email now that reviewer has responded
+        try:
+            is_revision = current_version > 1
+            qcr_result = send_qcr_assignment_email(item_id, is_revision=is_revision, version=current_version)
+            if qcr_result['success']:
+                print(f"  [Watcher] QCR email sent for item {item_id}")
+            else:
+                print(f"  [Watcher] Failed to send QCR email: {qcr_result.get('error')}")
+        except Exception as e:
+            print(f"  [Watcher] Error sending QCR email: {e}")
+        
+        return {'success': True, 'item_id': item_id, 'version': current_version}
+        
+    except json.JSONDecodeError:
+        return {'success': False, 'error': 'Invalid JSON file'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def process_qcr_response_json(json_path):
+    """Process a _qcr_response.json file and import it into the database."""
+    try:
+        with open(json_path, 'r', encoding='utf-8-sig') as f:
+            data = json.load(f)
+        
+        # Validate it's the right type
+        if data.get('_form_type') != 'qcr_response':
+            return {'success': False, 'error': 'Invalid form type'}
+        
+        token = data.get('token')
+        if not token:
+            return {'success': False, 'error': 'Missing token'}
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Find item by token
+        cursor.execute('SELECT id FROM item WHERE email_token_qcr = ?', (token,))
+        item = cursor.fetchone()
+        
+        if not item:
+            conn.close()
+            return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        item_id = item['id']
+        qc_action = data.get('qc_action')
+        
+        if qc_action == 'Send Back':
+            # Send back to reviewer
+            cursor.execute('''
+                UPDATE item SET
+                    qcr_action = 'Send Back',
+                    qcr_notes = ?,
+                    qcr_response_at = ?,
+                    qcr_response_status = 'Waiting for Revision',
+                    reviewer_response_status = 'Revision Requested'
+                WHERE id = ?
+            ''', (
+                data.get('qcr_notes'),
+                data.get('_submitted_at', datetime.now().isoformat()),
+                item_id
+            ))
+        else:
+            # Approve or Modify
+            selected_files_json = json.dumps(data.get('selected_files', []))
+            cursor.execute('''
+                UPDATE item SET
+                    qcr_action = ?,
+                    qcr_notes = ?,
+                    qcr_response_at = ?,
+                    qcr_response_status = 'Responded',
+                    qcr_response_mode = ?,
+                    final_response_category = ?,
+                    final_response_text = ?,
+                    final_response_files = ?,
+                    status = 'Ready for Response'
+                WHERE id = ?
+            ''', (
+                qc_action,
+                data.get('qcr_notes'),
+                data.get('_submitted_at', datetime.now().isoformat()),
+                data.get('response_mode'),
+                data.get('response_category'),
+                data.get('final_response_text'),
+                selected_files_json,
+                item_id
+            ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Rename processed file
+        processed_path = json_path.parent / f"_qcr_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        json_path.rename(processed_path)
+        
+        # If QCR sent back to reviewer, send a new reviewer email with revision request
+        if qc_action == 'Send Back':
+            try:
+                qcr_notes = data.get('qcr_notes', '')
+                reviewer_result = send_reviewer_assignment_email(item_id, is_revision=True, qcr_notes=qcr_notes)
+                if reviewer_result['success']:
+                    print(f"  [Watcher] Revision request email sent to reviewer for item {item_id}")
+                else:
+                    print(f"  [Watcher] Failed to send revision email: {reviewer_result.get('error')}")
+            except Exception as e:
+                print(f"  [Watcher] Error sending revision email: {e}")
+        
+        return {'success': True, 'item_id': item_id, 'action': qc_action}
+        
+    except json.JSONDecodeError:
+        return {'success': False, 'error': 'Invalid JSON file'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def scan_folders_for_responses():
+    """Scan all item folders for JSON response files and process them."""
+    base_path = Path(CONFIG['base_folder_path'])
+    results = {
+        'reviewer_responses': [],
+        'qcr_responses': [],
+        'errors': []
+    }
+    
+    if not base_path.exists():
+        return results
+    
+    # Scan for _reviewer_response.json files
+    for json_file in base_path.rglob('_reviewer_response.json'):
+        result = process_reviewer_response_json(json_file)
+        if result['success']:
+            results['reviewer_responses'].append({
+                'path': str(json_file),
+                'item_id': result.get('item_id'),
+                'version': result.get('version')
+            })
+        else:
+            results['errors'].append({
+                'path': str(json_file),
+                'error': result.get('error')
+            })
+    
+    # Scan for _qcr_response.json files
+    for json_file in base_path.rglob('_qcr_response.json'):
+        result = process_qcr_response_json(json_file)
+        if result['success']:
+            results['qcr_responses'].append({
+                'path': str(json_file),
+                'item_id': result.get('item_id'),
+                'action': result.get('action')
+            })
+        else:
+            results['errors'].append({
+                'path': str(json_file),
+                'error': result.get('error')
+            })
+    
+    return results
+
+
+class FolderResponseWatcher:
+    """Background watcher for JSON response files in item folders."""
+    
+    def __init__(self, interval_seconds=60):
+        self.running = False
+        self.thread = None
+        self.interval = interval_seconds
+        self.last_scan = None
+        self.scan_count = 0
+    
+    def start(self):
+        """Start the watcher thread."""
+        self.running = True
+        self.thread = threading.Thread(target=self._watch_loop, daemon=True)
+        self.thread.start()
+        print(f"Folder response watcher started (scanning every {self.interval}s)")
+    
+    def stop(self):
+        """Stop the watcher thread."""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        print("Folder response watcher stopped")
+    
+    def _watch_loop(self):
+        """Main watch loop."""
+        while self.running:
+            try:
+                results = scan_folders_for_responses()
+                self.last_scan = datetime.now()
+                self.scan_count += 1
+                
+                # Log any processed responses
+                for resp in results['reviewer_responses']:
+                    print(f"  [Watcher] Imported reviewer response for item {resp['item_id']} (v{resp['version']})")
+                for resp in results['qcr_responses']:
+                    print(f"  [Watcher] Imported QCR response for item {resp['item_id']} ({resp['action']})")
+                for err in results['errors']:
+                    print(f"  [Watcher] Error processing {err['path']}: {err['error']}")
+                    
+            except Exception as e:
+                print(f"  [Watcher] Scan error: {e}")
+            
+            # Sleep in small increments so we can stop quickly
+            for _ in range(self.interval):
+                if not self.running:
+                    break
+                time.sleep(1)
+
+
+# Global watcher instance
+folder_watcher = FolderResponseWatcher(interval_seconds=30)
 
 # =============================================================================
 # OUTLOOK EMAIL POLLING
@@ -1761,11 +2330,24 @@ def generate_token():
 
 def get_app_host():
     """Get the host URL for the application."""
+    # When deployed to web, use the configured web host URL
+    if CONFIG.get('deployment_mode') == 'web' and CONFIG.get('web_host_url'):
+        return CONFIG['web_host_url'].rstrip('/')
     # For local development, use localhost
     return f"http://localhost:{CONFIG.get('server_port', 5000)}"
 
-def send_reviewer_assignment_email(item_id):
-    """Send assignment email to the Initial Reviewer with magic link."""
+def is_local_mode():
+    """Check if running in local mode (use file-based forms)."""
+    return CONFIG.get('deployment_mode', 'local') == 'local'
+
+def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
+    """Send assignment email to the Initial Reviewer with magic link or file-based form.
+    
+    Args:
+        item_id: The item ID
+        is_revision: If True, this is a revision request from QCR
+        qcr_notes: QCR's notes when sending back for revision
+    """
     if not HAS_WIN32COM:
         return {'success': False, 'error': 'Outlook not available'}
     
@@ -1792,20 +2374,47 @@ def send_reviewer_assignment_email(item_id):
         conn.close()
         return {'success': False, 'error': 'No Initial Reviewer assigned'}
     
+    # Calculate due dates if not already set (ensures consistency with app display)
+    reviewer_due_date = item['initial_reviewer_due_date']
+    qcr_due_date = item['qcr_due_date']
+    
+    if item['date_received'] and item['due_date']:
+        calculated = calculate_review_due_dates(
+            item['date_received'],
+            item['due_date'],
+            item['priority']
+        )
+        # Use calculated values if database values are missing
+        if not reviewer_due_date:
+            reviewer_due_date = calculated['initial_reviewer_due_date']
+        if not qcr_due_date:
+            qcr_due_date = calculated['qcr_due_date']
+        
+        # Also update database if values were missing
+        if not item['initial_reviewer_due_date'] or not item['qcr_due_date']:
+            cursor.execute('''
+                UPDATE item SET 
+                    initial_reviewer_due_date = COALESCE(initial_reviewer_due_date, ?),
+                    qcr_due_date = COALESCE(qcr_due_date, ?)
+                WHERE id = ?
+            ''', (calculated['initial_reviewer_due_date'], calculated['qcr_due_date'], item_id))
+    
     # Generate token if not exists
     token = item['email_token_reviewer']
     if not token:
         token = generate_token()
         cursor.execute('UPDATE item SET email_token_reviewer = ? WHERE id = ?', (token, item_id))
     
-    # Build the magic link URL
-    respond_url = f"{get_app_host()}/respond/reviewer?token={token}"
+    conn.commit()
     
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
     
-    # Build email content
-    subject = f"[LEB] {item['identifier']} – Assigned to You"
+    # Build email content - different subject for revision
+    if is_revision:
+        subject = f"[LEB] {item['identifier']} – REVISION REQUESTED"
+    else:
+        subject = f"[LEB] {item['identifier']} – Assigned to You"
     
     # Create clickable folder link
     folder_path = item['folder_link'] or 'Not set'
@@ -1814,25 +2423,77 @@ def send_reviewer_assignment_email(item_id):
     else:
         folder_link_html = 'Not set'
     
-    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+    # Determine if using file-based forms (local mode) or server-based
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    if use_file_form:
+        # Generate the HTA form file in the item folder
+        form_result = generate_reviewer_form_html(item_id)
+        if form_result['success']:
+            form_file_path = form_result['path']
+            form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+            
+            # Build revision notice HTML if applicable
+            if is_revision:
+                revision_notice = f"""
+    <!-- REVISION NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#fff3cd; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:15px; color:#856404; font-weight:bold;">
+            ⚠️ REVISION REQUESTED BY QCR
+        </div>
+        <div style="font-size:13px; color:#856404; margin-top:8px;">
+            <strong>{item['qcr_name'] or 'The QCR'}</strong> has reviewed your response and is requesting revisions.
+        </div>
+        {f'<div style="margin-top:10px; padding:10px; background:#fff8e1; border-radius:4px; font-size:13px;"><strong>QCR Notes:</strong><br/>{qcr_notes}</div>' if qcr_notes else ''}
+    </div>
+"""
+                header_title = f"[LEB] {item['identifier']} - REVISION REQUESTED"
+                header_text = "Your response has been sent back for revision. Please review the QCR's notes and submit an updated response."
+            else:
+                revision_notice = ""
+                header_title = f"[LEB] {item['identifier']} - Assigned to You"
+                header_text = "You have been assigned a new review task. Please review the details below."
+            
+            # Email content for file-based form - DIRECT LINK to HTA file
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
-    <h2 style="color:#444; margin-bottom:6px;">
-        [LEB] {item['identifier']} – Assigned to You
+    <h2 style="color:{'#c0392b' if is_revision else '#444'}; margin-bottom:6px;">
+        {header_title}
     </h2>
 
     <p style="margin-top:0; font-size:13px; color:#666;">
-        You have been assigned a new review task. Please review the details below.
+        {header_text}
     </p>
+{revision_notice}
+    <!-- DIRECT LINK TO FORM - PROMINENT BUTTON -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        {'SUBMIT REVISED RESPONSE' if is_revision else 'OPEN RESPONSE FORM'}
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
 
-    <!-- ACTION BUTTON - AT TOP -->
-    <div style="margin:20px 0; text-align:left;">
-        <a href="{respond_url}"
-           style="background:linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color:white; padding:14px 32px; 
-                  font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
-                  box-shadow: 0 4px 6px rgba(39,174,96,0.3);">
-            ✅ Open Response Form
-        </a>
+    <!-- INSTRUCTIONS FOR HTA -->
+    <div style="margin:20px 0; padding:15px; background:#e8f5e9; border:1px solid #4caf50; border-radius:8px;">
+        <div style="font-size:14px; color:#2e7d32;">
+            <strong>Instructions:</strong>
+            <ol style="margin:8px 0 0 0; padding-left:20px;">
+                <li>Click the green button above (or navigate to the item folder's <strong>Responses</strong> subfolder)</li>
+                <li>Double-click <strong>_RESPONSE_FORM.hta</strong> to open it</li>
+                <li>If prompted, select <strong>"Microsoft (R) HTML Application host"</strong> - choose <strong>Open</strong>, do NOT save the file</li>
+                <li>Select your response category and any files to include</li>
+                <li>Click <strong>Submit Response</strong> - your response will be saved automatically</li>
+            </ol>
+        </div>
     </div>
 
     <!-- INFO TABLE -->
@@ -1864,8 +2525,140 @@ def send_reviewer_assignment_email(item_id):
         </tr>
 
         <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+        </tr>
+
+        <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+    </table>
+
+    <!-- FILE PATH SECTION -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Designated Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- CC NOTE -->
+    <p style="margin-top:16px; font-size:13px; color:#555;">
+        <strong>{item['qcr_name'] or 'The QCR'}</strong> has been CC'd so they are aware this review is in progress.
+    </p>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+        else:
+            # Fall back to server URL if form generation fails
+            use_file_form = False
+            print(f"Warning: Could not generate form file: {form_result.get('error')}")
+    
+    if not use_file_form:
+        # Use server-based form (original behavior)
+        server_url = f"{get_app_host()}/respond/reviewer?token={token}"
+        
+        if is_local_mode() and HAS_AIRTABLE:
+            airtable_url = get_airtable_form_url('reviewer', dict(item), token)
+            if airtable_url:
+                respond_url = airtable_url
+                button_text = "SUBMIT REVISED RESPONSE" if is_revision else "OPEN RESPONSE FORM"
+            else:
+                respond_url = server_url
+                button_text = "SUBMIT REVISED RESPONSE" if is_revision else "OPEN RESPONSE FORM"
+        else:
+            respond_url = server_url
+            button_text = "SUBMIT REVISED RESPONSE" if is_revision else "OPEN RESPONSE FORM"
+        
+        # Build revision notice for server-based email
+        if is_revision:
+            revision_notice_server = f"""
+    <!-- REVISION NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#fff3cd; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:15px; color:#856404; font-weight:bold;">
+            ⚠️ REVISION REQUESTED BY QCR
+        </div>
+        <div style="font-size:13px; color:#856404; margin-top:8px;">
+            <strong>{item['qcr_name'] or 'The QCR'}</strong> has reviewed your response and is requesting revisions.
+        </div>
+        {f'<div style="margin-top:10px; padding:10px; background:#fff8e1; border-radius:4px; font-size:13px;"><strong>QCR Notes:</strong><br/>{qcr_notes}</div>' if qcr_notes else ''}
+    </div>
+"""
+            header_title_server = f"[LEB] {item['identifier']} – REVISION REQUESTED"
+            header_text_server = "Your response has been sent back for revision. Please review the QCR's notes and submit an updated response."
+        else:
+            revision_notice_server = ""
+            header_title_server = f"[LEB] {item['identifier']} – Assigned to You"
+            header_text_server = "You have been assigned a new review task. Please review the details below."
+        
+        html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{'#c0392b' if is_revision else '#444'}; margin-bottom:6px;">
+        {header_title_server}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        {header_text_server}
+    </p>
+{revision_notice_server}
+    <!-- ACTION BUTTON - AT TOP -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{respond_url}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:280px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        {button_text}
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
         </tr>
 
         <tr>
@@ -1875,12 +2668,17 @@ def send_reviewer_assignment_email(item_id):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{item['initial_reviewer_due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
         </tr>
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{item['qcr_due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
         </tr>
     </table>
 
@@ -1908,12 +2706,41 @@ def send_reviewer_assignment_email(item_id):
         <strong>{item['qcr_name'] or 'The QCR'}</strong> has been CC'd so they are aware this review is in progress.
     </p>
 
+    <!--AIRTABLE_FALLBACK_PLACEHOLDER-->
+
     <!-- FOOTER -->
     <p style="margin-top:20px; font-size:12px; color:#777;">
         <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
     </p>
 
 </div>"""
+        
+        # Generate Airtable fallback link only when deployed to web (not in local mode)
+        airtable_fallback_section = ""
+        if not is_local_mode() and HAS_AIRTABLE:
+            try:
+                airtable_url = get_airtable_form_url('reviewer', dict(item), token)
+                if airtable_url:
+                    airtable_fallback_section = f'''
+    <!-- FALLBACK OPTION -->
+    <div style="margin-top:24px; padding:16px; background:#fff8e6; border:1px solid #ffd666; border-radius:8px;">
+        <div style="font-weight:bold; color:#d48806; margin-bottom:8px;">
+            🌐 Server Unavailable?
+        </div>
+        <p style="font-size:13px; color:#666; margin-bottom:12px;">
+            If the button above doesn't work, use this alternative form:
+        </p>
+        <a href="{airtable_url}"
+           style="background:#ffd666; color:#333; padding:10px 20px; 
+                  font-size:14px; font-weight:600; text-decoration:none; border-radius:6px; display:inline-block;">
+            📝 Use Backup Form
+        </a>
+    </div>
+'''
+            except:
+                pass
+        
+        html_body = html_body.replace('<!--AIRTABLE_FALLBACK_PLACEHOLDER-->', airtable_fallback_section)
     
     try:
         pythoncom.CoInitialize()
@@ -1948,7 +2775,7 @@ def send_reviewer_assignment_email(item_id):
         return {'success': False, 'error': str(e)}
 
 def send_qcr_assignment_email(item_id, is_revision=False, version=None):
-    """Send assignment email to the QCR with magic link."""
+    """Send assignment email to the QCR with magic link or file-based form."""
     if not HAS_WIN32COM:
         return {'success': False, 'error': 'Outlook not available'}
     
@@ -1975,17 +2802,35 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         conn.close()
         return {'success': False, 'error': 'No QCR assigned'}
     
+    # Calculate due dates if not already set (ensures consistency with app display)
+    qcr_due_date_email = item['qcr_due_date']
+    
+    if item['date_received'] and item['due_date']:
+        calculated = calculate_review_due_dates(
+            item['date_received'],
+            item['due_date'],
+            item['priority']
+        )
+        # Use calculated value if database value is missing
+        if not qcr_due_date_email:
+            qcr_due_date_email = calculated['qcr_due_date']
+        
+        # Also update database if value was missing
+        if not item['qcr_due_date']:
+            cursor.execute('''
+                UPDATE item SET qcr_due_date = ? WHERE id = ?
+            ''', (calculated['qcr_due_date'], item_id))
+    
     # Generate token if not exists
     token = item['email_token_qcr']
     if not token:
         token = generate_token()
         cursor.execute('UPDATE item SET email_token_qcr = ? WHERE id = ?', (token, item_id))
     
-    # Build the magic link URL
-    respond_url = f"{get_app_host()}/respond/qcr?token={token}"
+    conn.commit()
     
     # Get version info
-    current_version = version or item['reviewer_response_version'] or 1
+    current_version = version if version is not None else (item['reviewer_response_version'] if item['reviewer_response_version'] is not None else 0)
     
     # Get version history for display
     cursor.execute('''
@@ -2042,25 +2887,55 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     else:
         folder_link_html = 'Not set'
     
-    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+    # Determine if using file-based forms (local mode) or server-based
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    if use_file_form:
+        # Generate the HTA form file in the item folder
+        form_result = generate_qcr_form_html(item_id)
+        if form_result['success']:
+            form_file_path = form_result['path']
+            form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+            
+            # Email content for file-based form - DIRECT LINK to HTA file
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
     <h2 style="color:#444; margin-bottom:6px;">
-        [LEB] {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
+        [LEB] {item['identifier']} - Ready for Your Review {f'(v{current_version})' if is_revision else ''}
     </h2>
 
     <p style="margin-top:0; font-size:13px; color:#666;">
         {intro_text}
     </p>
 
-    <!-- ACTION BUTTON - AT TOP -->
-    <div style="margin:20px 0; text-align:left;">
-        <a href="{respond_url}"
-           style="background:linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color:white; padding:14px 32px; 
-                  font-size:16px; font-weight:600; text-decoration:none; border-radius:8px; display:inline-block;
-                  box-shadow: 0 4px 6px rgba(39,174,96,0.3);">
-            ✅ Open QC Review Form
-        </a>
+    <!-- DIRECT LINK TO QCR FORM - PROMINENT BUTTON -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#11998e" style="background:#11998e; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#11998e; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN QC REVIEW FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INSTRUCTIONS FOR HTA -->
+    <div style="margin:20px 0; padding:15px; background:#e8f5e9; border:1px solid #4caf50; border-radius:8px;">
+        <div style="font-size:14px; color:#2e7d32;">
+            <strong>Instructions:</strong>
+            <ol style="margin:8px 0 0 0; padding-left:20px;">
+                <li>Click the green button above (or navigate to the item folder's <strong>Responses</strong> subfolder)</li>
+                <li>Double-click <strong>_QCR_RESPONSE_FORM.hta</strong> to open it</li>
+                <li>If prompted, select <strong>"Microsoft (R) HTML Application host"</strong> - choose <strong>Open</strong>, do NOT save the file</li>
+                <li>Review the response, make your decision, and click <strong>Submit</strong></li>
+            </ol>
+        </div>
     </div>
 
     <!-- INFO TABLE -->
@@ -2073,7 +2948,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
-            <td style="border:1px solid #ddd;">{item['type']}</td>
+            <td style="border:1px solid #ddd;">{item['type']}
         </tr>
 
         <tr>
@@ -2092,8 +2967,150 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['reviewer_name'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
+        </tr>
+
+        <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+    </table>
+
+    <!-- REVIEWER RESPONSE SECTION -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:16px;">
+        <tr>
+            <td colspan="2" style="background:#d5f5e3; font-weight:bold; border:1px solid #82e0aa; color:#1e8449;">
+                ✅ Reviewer's Submitted Response (v{current_version})
+            </td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Category</td>
+            <td style="border:1px solid #ddd; color:#1e8449; font-weight:bold;">{item['reviewer_response_category'] or 'Not specified'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Selected Files</td>
+            <td style="border:1px solid #ddd;">{reviewer_files_display}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Notes</td>
+            <td style="border:1px solid #ddd;">{reviewer_notes_html}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Responded At</td>
+            <td style="border:1px solid #ddd;">{reviewer_response_time}</td>
+        </tr>
+    </table>
+
+    {version_history_html}
+
+    <!-- FILE PATH SECTION -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Designated Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- CC NOTE -->
+    <p style="margin-top:16px; font-size:13px; color:#555;">
+        <strong>{item['reviewer_name'] or 'The Initial Reviewer'}</strong> has been CC'd on this email for visibility.
+    </p>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+        else:
+            # Fall back to server URL if form generation fails
+            use_file_form = False
+            print(f"Warning: Could not generate QCR form file: {form_result.get('error')}")
+    
+    if not use_file_form:
+        # Use server-based form (original behavior)
+        server_url = f"{get_app_host()}/respond/qcr?token={token}"
+        
+        if is_local_mode() and HAS_AIRTABLE:
+            airtable_url = get_airtable_form_url('qcr', dict(item), token)
+            if airtable_url:
+                respond_url = airtable_url
+                qcr_button_text = "OPEN QC REVIEW FORM"
+            else:
+                respond_url = server_url
+                qcr_button_text = "OPEN QC REVIEW FORM"
+        else:
+            respond_url = server_url
+            qcr_button_text = "OPEN QC REVIEW FORM"
+        
+        html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        {intro_text}
+    </p>
+
+    <!-- ACTION BUTTON - AT TOP -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{respond_url}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:280px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        {qcr_button_text}
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
         </tr>
 
         <tr>
@@ -2108,7 +3125,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{item['qcr_due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
         </tr>
     </table>
 
@@ -2169,12 +3191,41 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         <strong>{item['reviewer_name'] or 'The Initial Reviewer'}</strong> has been CC'd on this email for visibility.
     </p>
 
+    <!--QCR_AIRTABLE_FALLBACK_PLACEHOLDER-->
+
     <!-- FOOTER -->
     <p style="margin-top:20px; font-size:12px; color:#777;">
         <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
     </p>
 
 </div>"""
+        
+        # Generate Airtable fallback link only when deployed to web (not in local mode)
+        qcr_airtable_fallback = ""
+        if not is_local_mode() and HAS_AIRTABLE:
+            try:
+                airtable_url = get_airtable_form_url('qcr', dict(item), token)
+                if airtable_url:
+                    qcr_airtable_fallback = f'''
+    <!-- FALLBACK OPTION -->
+    <div style="margin-top:24px; padding:16px; background:#fff8e6; border:1px solid #ffd666; border-radius:8px;">
+        <div style="font-weight:bold; color:#d48806; margin-bottom:8px;">
+            🌐 Server Unavailable?
+        </div>
+        <p style="font-size:13px; color:#666; margin-bottom:12px;">
+            If the button above doesn't work, use this alternative form:
+        </p>
+        <a href="{airtable_url}"
+           style="background:#ffd666; color:#333; padding:10px 20px; 
+                  font-size:14px; font-weight:600; text-decoration:none; border-radius:6px; display:inline-block;">
+            📝 Use Backup Form
+        </a>
+    </div>
+'''
+            except:
+                pass
+        
+        html_body = html_body.replace('<!--QCR_AIRTABLE_FALLBACK_PLACEHOLDER-->', qcr_airtable_fallback)
     
     try:
         pythoncom.CoInitialize()
@@ -2244,7 +3295,17 @@ def send_qcr_version_update_email(item_id, version):
         cursor.execute('UPDATE item SET email_token_qcr = ? WHERE id = ?', (token, item_id))
         conn.commit()
     
-    respond_url = f"{get_app_host()}/respond/qcr?token={token}"
+    # Build the form URL - use Airtable in local mode, server URL when deployed
+    server_url = f"{get_app_host()}/respond/qcr?token={token}"
+    
+    if is_local_mode() and HAS_AIRTABLE:
+        airtable_url = get_airtable_form_url('qcr', dict(item), token)
+        if airtable_url:
+            respond_url = airtable_url
+        else:
+            respond_url = server_url
+    else:
+        respond_url = server_url
     
     # Get version history
     cursor.execute('''
@@ -2379,7 +3440,7 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
         return {'success': False, 'error': 'No reviewer email'}
     
     # Get version info
-    version = item['reviewer_response_version'] or 1
+    version = item['reviewer_response_version'] if item['reviewer_response_version'] is not None else 0
     
     # Build email based on action
     if qc_action == 'Approve':
@@ -2427,7 +3488,18 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
         cursor.execute('UPDATE item SET email_token_reviewer = ? WHERE id = ?', (new_token, item_id))
         conn.commit()
         
-        respond_url = f"{get_app_host()}/respond/reviewer?token={new_token}"
+        # Build the form URL - use Airtable in local mode, server URL when deployed
+        server_url = f"{get_app_host()}/respond/reviewer?token={new_token}"
+        
+        if is_local_mode() and HAS_AIRTABLE:
+            airtable_url = get_airtable_form_url('reviewer', dict(item), new_token)
+            if airtable_url:
+                respond_url = airtable_url
+            else:
+                respond_url = server_url
+        else:
+            respond_url = server_url
+        
         revision_link = f"""
         <p style="margin: 20px 0;">
             <a href="{respond_url}" style="display: inline-block; background: #dc2626; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold;">📝 Revise Your Response (Submit v{version + 1})</a>
@@ -2997,6 +4069,53 @@ def api_create_item():
     
     return jsonify(item), 201
 
+
+@app.route('/api/items/<int:item_id>', methods=['DELETE'])
+@login_required
+def api_delete_item(item_id):
+    """Delete an item and optionally its folder."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get the item first to check if it exists and get folder path
+    cursor.execute('SELECT * FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return jsonify({'error': 'Item not found'}), 404
+    
+    folder_path = item['folder_link']
+    
+    # Delete related records first (history, notifications, etc.)
+    cursor.execute('DELETE FROM reviewer_response_history WHERE item_id = ?', (item_id,))
+    cursor.execute('DELETE FROM notification WHERE item_id = ?', (item_id,))
+    
+    # Delete the item
+    cursor.execute('DELETE FROM item WHERE id = ?', (item_id,))
+    conn.commit()
+    conn.close()
+    
+    # Optionally delete the folder (check query param)
+    delete_folder = request.args.get('delete_folder', 'false').lower() == 'true'
+    folder_deleted = False
+    
+    if delete_folder and folder_path:
+        try:
+            import shutil
+            folder = Path(folder_path)
+            if folder.exists():
+                shutil.rmtree(folder)
+                folder_deleted = True
+        except Exception as e:
+            print(f"Warning: Could not delete folder {folder_path}: {e}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Item {item_id} deleted',
+        'folder_deleted': folder_deleted
+    })
+
 # =============================================================================
 # API ROUTES - INBOX
 # =============================================================================
@@ -3345,12 +4464,17 @@ def api_open_original_email(item_id):
             
             # Get the email by EntryID
             mail_item = namespace.GetItemFromID(entry_id)
-            mail_item.Display()  # Opens the email in Outlook
+            
+            # Get the inspector (window) and activate it to bring to front
+            inspector = mail_item.GetInspector
+            inspector.Activate()
+            mail_item.Display(True)  # True = modal window
             
             return jsonify({'success': True, 'message': 'Email opened in Outlook'})
         finally:
             pythoncom.CoUninitialize()
     except Exception as e:
+        print(f"Error opening email: {e}")
         return jsonify({'error': f'Could not open email: {str(e)}'}), 500
 
 # =============================================================================
@@ -3530,6 +4654,40 @@ def api_update_config():
     return jsonify(CONFIG)
 
 # =============================================================================
+# API ROUTES - AIRTABLE SYNC
+# =============================================================================
+
+@app.route('/api/airtable/sync', methods=['POST'])
+@admin_required
+def api_airtable_sync():
+    """Manually trigger sync of Airtable responses."""
+    if not HAS_AIRTABLE:
+        return jsonify({'error': 'Airtable integration not available'}), 400
+    
+    try:
+        result = sync_airtable_responses()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/airtable/status', methods=['GET'])
+@login_required
+def api_airtable_status():
+    """Get Airtable configuration status."""
+    if not HAS_AIRTABLE:
+        return jsonify({'configured': False, 'available': False})
+    
+    config = load_airtable_config()
+    is_configured = bool(config.get('api_key') and config.get('base_id'))
+    
+    return jsonify({
+        'available': True,
+        'configured': is_configured,
+        'has_reviewer_form': bool(config.get('reviewer_form_id')),
+        'has_qcr_form': bool(config.get('qcr_form_id'))
+    })
+
+# =============================================================================
 # MAGIC-LINK RESPONSE ROUTES
 # =============================================================================
 
@@ -3590,12 +4748,12 @@ def respond_reviewer_form():
             can_submit = False
     
     # Get current version info
-    # First submission is v1, revisions are v2, v3, etc.
+    # First submission is v0, revisions are v1, v2, etc.
     current_version = item['reviewer_response_version'] or 0
     if is_resubmit:
         next_version = current_version + 1
     else:
-        next_version = 1  # First submission is always v1
+        next_version = 0  # First submission is always v0
     
     # Get previous response for pre-fill
     previous_response = None
@@ -3714,9 +4872,9 @@ def respond_reviewer_submit():
     selected_files = request.form.getlist('selected_files')
     
     # Calculate new version
-    # First submission is v1, revisions are v2, v3, etc.
-    current_version = item['reviewer_response_version'] or 0
-    new_version = current_version + 1 if current_version > 0 else 1
+    # First submission is v0, revisions are v1, v2, etc.
+    current_version = item['reviewer_response_version']
+    new_version = (current_version + 1) if current_version is not None else 0
     
     # Track if this was a send-back scenario (before we reset qcr_action)
     was_sent_back = qcr_action == 'Send Back'
@@ -3881,7 +5039,7 @@ def respond_qcr_form():
             pass
     
     # Get version info
-    current_version = item['reviewer_response_version'] or 1
+    current_version = item['reviewer_response_version'] if item['reviewer_response_version'] is not None else 0
     
     return render_template_string(QCR_RESPONSE_TEMPLATE, 
         item=dict(item),
@@ -4200,6 +5358,66 @@ def api_mark_item_complete(item_id):
     return jsonify({'success': True, 'message': 'Item marked as complete'})
 
 # =============================================================================
+# FILE-BASED FORM API ENDPOINTS
+# =============================================================================
+
+@app.route('/api/items/<int:item_id>/generate-reviewer-form', methods=['POST'])
+@admin_required
+def api_generate_reviewer_form(item_id):
+    """Generate a self-contained HTML reviewer form in the item folder."""
+    try:
+        result = generate_reviewer_form_html(item_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/items/<int:item_id>/generate-qcr-form', methods=['POST'])
+@admin_required
+def api_generate_qcr_form(item_id):
+    """Generate a self-contained HTML QCR form in the item folder."""
+    try:
+        result = generate_qcr_form_html(item_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/scan-folder-responses', methods=['POST'])
+@admin_required
+def api_scan_folder_responses():
+    """Manually trigger a scan for JSON response files."""
+    try:
+        results = scan_folders_for_responses()
+        return jsonify({
+            'success': True,
+            'reviewer_responses_imported': len(results['reviewer_responses']),
+            'qcr_responses_imported': len(results['qcr_responses']),
+            'errors': results['errors'],
+            'details': results
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/watcher-status', methods=['GET'])
+@login_required
+def api_watcher_status():
+    """Get the status of the folder response watcher."""
+    return jsonify({
+        'running': folder_watcher.running,
+        'last_scan': folder_watcher.last_scan.isoformat() if folder_watcher.last_scan else None,
+        'scan_count': folder_watcher.scan_count,
+        'interval_seconds': folder_watcher.interval
+    })
+
+# =============================================================================
 # STATIC FILE ROUTES
 # =============================================================================
 
@@ -4232,9 +5450,46 @@ def main():
     base_folder.mkdir(parents=True, exist_ok=True)
     print(f"Base folder: {base_folder}")
     
+    # Sync Airtable responses if configured
+    if HAS_AIRTABLE:
+        print("Checking for Airtable responses...")
+        try:
+            config = load_airtable_config()
+            if config.get('api_key') and config.get('base_id'):
+                result = sync_airtable_responses()
+                if result['synced_count'] > 0:
+                    print(f"  Synced {result['synced_count']} responses from Airtable")
+                else:
+                    print("  No new Airtable responses to sync")
+                if result.get('errors'):
+                    for err in result['errors']:
+                        print(f"  Warning: {err}")
+            else:
+                print("  Airtable not configured (add credentials to config.json)")
+        except Exception as e:
+            print(f"  Airtable sync error: {e}")
+    
+    # Scan for file-based responses on startup
+    print("Scanning for file-based responses...")
+    try:
+        results = scan_folders_for_responses()
+        total_imported = len(results['reviewer_responses']) + len(results['qcr_responses'])
+        if total_imported > 0:
+            print(f"  Imported {total_imported} response(s) from folder files")
+        else:
+            print("  No pending file responses found")
+        for err in results.get('errors', []):
+            print(f"  Warning: {err}")
+    except Exception as e:
+        print(f"  Folder scan error: {e}")
+    
     # Start email poller
     print("Starting email poller...")
     email_poller.start()
+    
+    # Start folder response watcher
+    print("Starting folder response watcher...")
+    folder_watcher.start()
     
     # Start web server
     port = CONFIG.get('server_port', 5000)
@@ -4247,6 +5502,7 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down...")
         email_poller.stop()
+        folder_watcher.stop()
 
 if __name__ == '__main__':
     main()

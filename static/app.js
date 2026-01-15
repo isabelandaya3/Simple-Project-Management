@@ -15,9 +15,11 @@ const state = {
     currentBucket: 'ALL',
     currentTypeFilter: '',
     currentView: 'items', // 'items', 'inbox', or 'workflow'
-    showClosed: false,
+    closedSectionExpanded: false,  // Whether closed items section is expanded
     selectedItemId: null,
-    workflowItems: []
+    workflowItems: [],
+    selectedItemIds: [],  // For multi-select
+    selectMode: false     // Whether we're in selection mode
 };
 
 // =============================================================================
@@ -296,7 +298,7 @@ async function loadInitialData() {
 }
 
 /**
- * Load items list
+ * Load items list - always load both open and closed items
  */
 async function loadItems() {
     try {
@@ -310,9 +312,8 @@ async function loadItems() {
             endpoint += `type=${state.currentTypeFilter}&`;
         }
         
-        if (state.showClosed) {
-            endpoint += `show_closed=1&`;
-        }
+        // Always load closed items too - we'll separate them in rendering
+        endpoint += `show_closed=true&`;
         
         state.items = await api(endpoint);
         renderItems();
@@ -374,13 +375,58 @@ function getDueDateClass(status) {
 }
 
 /**
+ * Generate row HTML for an item
+ */
+function generateItemRow(item) {
+    const typeClass = item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal';
+    const priorityClass = item.priority ? `chip-${item.priority.toLowerCase()}` : '';
+    const closedClass = item.closed_at ? 'closed-row' : '';
+    const insufficientClass = item.is_contractor_window_insufficient ? 'insufficient-warning' : '';
+    
+    // Check if item is unread by current user
+    const readBy = item.read_by ? item.read_by.split(',').map(id => parseInt(id)) : [];
+    const isUnread = state.user && !readBy.includes(state.user.id);
+    const unreadDot = isUnread ? '<span class="unread-dot"></span>' : '';
+    
+    // Warning icon for insufficient window
+    const warningIcon = item.is_contractor_window_insufficient ? '<span class="warning-icon-small" title="Insufficient contractor window">⚠️</span>' : '';
+    
+    // Selection checkbox for select mode
+    const isSelected = state.selectedItemIds.includes(item.id);
+    const selectCheckbox = state.selectMode ? 
+        `<td class="select-cell"><input type="checkbox" class="item-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleItemSelection(${item.id})"></td>` : '';
+    const selectedClass = isSelected ? 'selected-row' : '';
+    
+    return `
+        <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass} ${selectedClass}">
+            ${selectCheckbox}
+            <td>${unreadDot}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
+            <td>${warningIcon}${escapeHtml(item.identifier)}</td>
+            <td>${escapeHtml(item.title) || '<span class="text-muted">No title</span>'}</td>
+            <td>${formatDate(item.date_received)}</td>
+            <td>${item.priority ? `<span class="chip ${priorityClass}">${escapeHtml(item.priority)}</span>` : '-'}</td>
+            <td>${formatDate(item.due_date)}</td>
+            <td>${formatDate(item.initial_reviewer_due_date)}</td>
+            <td>${formatDate(item.qcr_due_date)}</td>
+            <td><span class="chip chip-status">${escapeHtml(item.status)}</span></td>
+            <td>${escapeHtml(item.initial_reviewer_name) || '<span class="text-muted">-</span>'}</td>
+            <td>${escapeHtml(item.qcr_name) || '<span class="text-muted">-</span>'}</td>
+        </tr>
+    `;
+}
+
+/**
  * Render items table
  */
 function renderItems() {
     const tbody = document.getElementById('items-table-body');
     const emptyState = document.getElementById('empty-state');
     
-    if (state.items.length === 0) {
+    // Separate open and closed items
+    const openItems = state.items.filter(item => !item.closed_at);
+    const closedItems = state.items.filter(item => item.closed_at);
+    
+    if (openItems.length === 0 && closedItems.length === 0) {
         tbody.innerHTML = '';
         show(emptyState);
         return;
@@ -388,36 +434,46 @@ function renderItems() {
     
     hide(emptyState);
     
-    tbody.innerHTML = state.items.map(item => {
-        const typeClass = item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal';
-        const priorityClass = item.priority ? `chip-${item.priority.toLowerCase()}` : '';
-        const closedClass = item.closed_at ? 'closed' : '';
-        const insufficientClass = item.is_contractor_window_insufficient ? 'insufficient-warning' : '';
+    // Render open items
+    let html = openItems.map(item => generateItemRow(item)).join('');
+    
+    // Add closed items section if there are any
+    if (closedItems.length > 0) {
+        const isExpanded = state.closedSectionExpanded || false;
+        const colSpan = state.selectMode ? 12 : 11;
         
-        // Check if item is unread by current user
-        const readBy = item.read_by ? item.read_by.split(',').map(id => parseInt(id)) : [];
-        const isUnread = state.user && !readBy.includes(state.user.id);
-        const unreadDot = isUnread ? '<span class="unread-dot"></span>' : '';
-        
-        // Warning icon for insufficient window
-        const warningIcon = item.is_contractor_window_insufficient ? '<span class="warning-icon-small" title="Insufficient contractor window">⚠️</span>' : '';
-        
-        return `
-            <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass}">
-                <td>${unreadDot}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
-                <td>${warningIcon}${escapeHtml(item.identifier)}</td>
-                <td>${escapeHtml(item.title) || '<span class="text-muted">No title</span>'}</td>
-                <td>${formatDate(item.date_received)}</td>
-                <td>${item.priority ? `<span class="chip ${priorityClass}">${escapeHtml(item.priority)}</span>` : '-'}</td>
-                <td>${formatDate(item.due_date)}</td>
-                <td>${formatDate(item.initial_reviewer_due_date)}</td>
-                <td>${formatDate(item.qcr_due_date)}</td>
-                <td><span class="chip chip-status">${escapeHtml(item.status)}</span></td>
-                <td>${escapeHtml(item.initial_reviewer_name) || '<span class="text-muted">-</span>'}</td>
-                <td>${escapeHtml(item.qcr_name) || '<span class="text-muted">-</span>'}</td>
+        html += `
+            <tr class="closed-section-header" onclick="toggleClosedSection()">
+                <td colspan="${colSpan}">
+                    <span class="closed-section-toggle">${isExpanded ? '▼' : '▶'}</span>
+                    <span class="closed-section-title">Closed Items (${closedItems.length})</span>
+                </td>
             </tr>
         `;
-    }).join('');
+        
+        if (isExpanded) {
+            html += closedItems.map(item => generateItemRow(item)).join('');
+        }
+    }
+    
+    tbody.innerHTML = html;
+    
+    // Update table header for select mode
+    const thead = document.querySelector('#items-table thead tr');
+    const hasSelectHeader = thead.querySelector('.select-header');
+    if (state.selectMode && !hasSelectHeader) {
+        thead.insertAdjacentHTML('afterbegin', '<th class="select-header"><input type="checkbox" id="select-all-checkbox" onclick="toggleSelectAll()"></th>');
+    } else if (!state.selectMode && hasSelectHeader) {
+        hasSelectHeader.remove();
+    }
+}
+
+/**
+ * Toggle closed items section expand/collapse
+ */
+function toggleClosedSection() {
+    state.closedSectionExpanded = !state.closedSectionExpanded;
+    renderItems();
 }
 
 /**
@@ -747,22 +803,27 @@ function openFolder() {
  * Open original email in Outlook
  */
 async function openOriginalEmail() {
+    console.log('openOriginalEmail called, selectedItemId:', state.selectedItemId);
+    
     if (!state.selectedItemId) {
         alert('No item selected.');
         return;
     }
     
     try {
+        console.log('Making API call to open email...');
         const result = await api(`/item/${state.selectedItemId}/open-email`, {
             method: 'POST'
         });
         
+        console.log('API result:', result);
         if (result.success) {
             console.log('Opened email in Outlook');
         } else {
             alert(result.error || 'Could not open email');
         }
     } catch (e) {
+        console.error('Error opening email:', e);
         if (e.message.includes('No original email')) {
             alert('No original email found for this item. This item may have been created manually.');
         } else {
@@ -1192,8 +1253,12 @@ function renderNotifications(notifications) {
         const timeAgo = formatTimeAgo(n.created_at);
         
         let actionsHtml = '';
+        // Add View Item button if item_id is present
+        if (n.item_id) {
+            actionsHtml += `<button class="btn btn-outline btn-sm" onclick="viewNotificationItem(${n.item_id}, ${n.id})">👁️ View Item</button>`;
+        }
         if (n.action_url && n.action_label) {
-            actionsHtml = `<button class="btn btn-primary btn-sm" onclick="handleNotificationAction(${n.id}, '${n.action_url}')">${n.action_label}</button>`;
+            actionsHtml = `<button class="btn btn-primary btn-sm" onclick="handleNotificationAction(${n.id}, '${n.action_url}')">${n.action_label}</button>` + actionsHtml;
         }
         if (n.type === 'response_ready' && n.item_id) {
             actionsHtml += `<button class="btn btn-success btn-sm" onclick="markItemComplete(${n.item_id}, ${n.id})">✓ Mark Complete</button>`;
@@ -1334,6 +1399,22 @@ async function markItemComplete(itemId, notificationId) {
 }
 
 /**
+ * View item from notification - opens the item drawer
+ */
+async function viewNotificationItem(itemId, notificationId) {
+    // Mark notification as read
+    if (notificationId) {
+        await markNotificationRead(notificationId);
+    }
+    
+    // Close notifications panel
+    hide('notifications-container');
+    
+    // Open item drawer
+    openDetailDrawer(itemId);
+}
+
+/**
  * Update notification count badge
  */
 async function updateNotificationCount() {
@@ -1408,17 +1489,77 @@ function updateDrawerWorkflowStatus(item) {
         
         if (reviewerResponded) {
             statusHtml += `<p class="success"><strong>Reviewer Response:</strong> ${formatDateTime(item.reviewer_response_at)}</p>`;
-            statusHtml += `<p><strong>Category:</strong> ${item.reviewer_response_category || 'N/A'}</p>`;
+            statusHtml += `<p><strong>Reviewer Category:</strong> ${item.reviewer_response_category || 'N/A'}</p>`;
+            if (item.reviewer_notes) {
+                statusHtml += `<p><strong>Reviewer Notes:</strong> ${escapeHtml(item.reviewer_notes.substring(0, 100))}${item.reviewer_notes.length > 100 ? '...' : ''}</p>`;
+            }
+            // Show reviewer selected files
+            if (item.reviewer_selected_files) {
+                try {
+                    const files = JSON.parse(item.reviewer_selected_files);
+                    if (files.length > 0) {
+                        statusHtml += `<p><strong>Reviewer Files:</strong> ${files.length} file(s) selected</p>`;
+                    }
+                } catch(e) {}
+            }
         } else {
             statusHtml += `<p class="info"><strong>Reviewer Status:</strong> Awaiting Response</p>`;
         }
         
         if (item.qcr_email_sent_at) {
+            statusHtml += `<hr style="margin: 10px 0; border-color: #e5e7eb;">`;
             statusHtml += `<p><strong>QCR Email:</strong> Sent ${formatDateTime(item.qcr_email_sent_at)}</p>`;
             
             if (qcrResponded) {
+                // Show QCR action with color coding
+                const actionIcon = item.qcr_action === 'Approve' ? '✅' : item.qcr_action === 'Modify' ? '✏️' : '↩️';
+                const actionColor = item.qcr_action === 'Approve' ? '#059669' : item.qcr_action === 'Modify' ? '#2563eb' : '#dc2626';
                 statusHtml += `<p class="success"><strong>QCR Response:</strong> ${formatDateTime(item.qcr_response_at)}</p>`;
-                statusHtml += `<p><strong>Final Category:</strong> ${item.qcr_response_category || 'N/A'}</p>`;
+                statusHtml += `<p><strong>QCR Action:</strong> <span style="color: ${actionColor}; font-weight: bold;">${actionIcon} ${item.qcr_action || 'N/A'}</span></p>`;
+                if (item.qcr_response_mode) {
+                    statusHtml += `<p><strong>Response Mode:</strong> ${item.qcr_response_mode}</p>`;
+                }
+                if (item.qcr_notes) {
+                    statusHtml += `<p><strong>QCR Notes:</strong> ${escapeHtml(item.qcr_notes)}</p>`;
+                }
+                
+                // Show QCR's modified response text if they edited it (Tweak/Revise mode)
+                if (item.qcr_response_text && item.qcr_response_mode && item.qcr_response_mode !== 'Keep') {
+                    statusHtml += `<div style="background: #eff6ff; padding: 8px; border-radius: 4px; margin-top: 8px; border-left: 3px solid #2563eb;">`;
+                    statusHtml += `<p style="margin: 0 0 5px 0;"><strong style="color: #2563eb;">✏️ QCR Modified Response:</strong></p>`;
+                    statusHtml += `<p style="margin: 0; white-space: pre-wrap;">${escapeHtml(item.qcr_response_text)}</p>`;
+                    statusHtml += `</div>`;
+                }
+                
+                // Show final response if available
+                if (item.final_response_category) {
+                    statusHtml += `<hr style="margin: 10px 0; border-color: #10b981;">`;
+                    statusHtml += `<div style="background: #ecfdf5; padding: 10px; border-radius: 6px; margin-top: 8px;">`;
+                    statusHtml += `<p style="margin: 0 0 5px 0;"><strong style="color: #059669;">📋 FINAL RESPONSE</strong></p>`;
+                    statusHtml += `<p style="margin: 3px 0;"><strong>Category:</strong> ${item.final_response_category}</p>`;
+                    // Include QCR notes in final response
+                    if (item.qcr_notes) {
+                        statusHtml += `<p style="margin: 8px 0 3px 0;"><strong>Response Notes:</strong></p>`;
+                        statusHtml += `<div style="background: white; padding: 8px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(item.qcr_notes)}</div>`;
+                    }
+                    if (item.final_response_text && item.final_response_text !== item.qcr_notes) {
+                        statusHtml += `<p style="margin: 8px 0 3px 0;"><strong>Response Text:</strong></p>`;
+                        statusHtml += `<div style="background: white; padding: 8px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(item.final_response_text)}</div>`;
+                    }
+                    if (item.final_response_files) {
+                        try {
+                            const finalFiles = JSON.parse(item.final_response_files);
+                            if (finalFiles.length > 0) {
+                                statusHtml += `<p style="margin: 8px 0 3px 0;"><strong>Files:</strong></p><ul style="margin: 3px 0; padding-left: 20px;">`;
+                                finalFiles.forEach(f => {
+                                    statusHtml += `<li style="font-size: 0.85rem;">${escapeHtml(f)}</li>`;
+                                });
+                                statusHtml += `</ul>`;
+                            }
+                        } catch(e) {}
+                    }
+                    statusHtml += `</div>`;
+                }
             } else {
                 statusHtml += `<p class="info"><strong>QCR Status:</strong> Awaiting Response</p>`;
             }
@@ -1585,6 +1726,164 @@ async function reopenItem() {
     } catch (e) {
         alert('Failed to reopen item: ' + e.message);
     }
+}
+
+/**
+ * Delete an item (admin only) - single item from drawer
+ */
+async function deleteItem() {
+    if (!state.selectedItemId) return;
+    
+    const deleteFolder = confirm('Do you also want to DELETE the folder and all its files?\n\nClick OK to delete folder, Cancel to keep folder.');
+    
+    if (!confirm(`ARE YOU SURE you want to permanently delete this item?\n\nThis action CANNOT be undone.`)) {
+        return;
+    }
+    
+    try {
+        await api(`/items/${state.selectedItemId}?delete_folder=${deleteFolder}`, { method: 'DELETE' });
+        
+        // Close drawer and refresh
+        closeDetailDrawer();
+        await loadItems();
+        await loadStats();
+        
+        alert('Item deleted successfully');
+    } catch (e) {
+        alert('Failed to delete item: ' + e.message);
+    }
+}
+
+/**
+ * Toggle selection mode for multi-select
+ */
+function toggleSelectMode() {
+    state.selectMode = !state.selectMode;
+    state.selectedItemIds = [];
+    
+    const btn = document.getElementById('btn-select-mode');
+    const deleteBtn = document.getElementById('btn-delete-selected');
+    const cancelBtn = document.getElementById('btn-cancel-select');
+    
+    if (state.selectMode) {
+        btn.textContent = '☑️ Selection Mode ON';
+        btn.classList.add('active');
+        show('btn-delete-selected');
+        show('btn-cancel-select');
+        document.getElementById('items-table').classList.add('select-mode');
+    } else {
+        btn.textContent = '☐ Select Items';
+        btn.classList.remove('active');
+        hide('btn-delete-selected');
+        hide('btn-cancel-select');
+        document.getElementById('items-table').classList.remove('select-mode');
+    }
+    
+    updateSelectionCount();
+    renderItems();
+}
+
+/**
+ * Cancel selection mode
+ */
+function cancelSelectMode() {
+    state.selectMode = false;
+    state.selectedItemIds = [];
+    
+    const btn = document.getElementById('btn-select-mode');
+    btn.textContent = '☐ Select Items';
+    btn.classList.remove('active');
+    hide('btn-delete-selected');
+    hide('btn-cancel-select');
+    document.getElementById('items-table').classList.remove('select-mode');
+    
+    updateSelectionCount();
+    renderItems();
+}
+
+/**
+ * Toggle item selection
+ */
+function toggleItemSelection(itemId) {
+    const idx = state.selectedItemIds.indexOf(itemId);
+    if (idx === -1) {
+        state.selectedItemIds.push(itemId);
+    } else {
+        state.selectedItemIds.splice(idx, 1);
+    }
+    updateSelectionCount();
+    renderItems();
+}
+
+/**
+ * Update selection count display
+ */
+function updateSelectionCount() {
+    const deleteBtn = document.getElementById('btn-delete-selected');
+    if (state.selectedItemIds.length > 0) {
+        deleteBtn.textContent = `🗑️ Delete Selected (${state.selectedItemIds.length})`;
+        deleteBtn.disabled = false;
+    } else {
+        deleteBtn.textContent = '🗑️ Delete Selected (0)';
+        deleteBtn.disabled = true;
+    }
+}
+
+/**
+ * Delete all selected items
+ */
+async function deleteSelectedItems() {
+    if (state.selectedItemIds.length === 0) {
+        alert('No items selected');
+        return;
+    }
+    
+    const count = state.selectedItemIds.length;
+    const deleteFolder = confirm(`Do you want to DELETE the folders for all ${count} items?\n\nClick OK to delete folders, Cancel to keep folders.`);
+    
+    if (!confirm(`ARE YOU SURE you want to permanently delete ${count} item(s)?\n\nThis action CANNOT be undone.`)) {
+        return;
+    }
+    
+    let successCount = 0;
+    let errorCount = 0;
+    
+    for (const itemId of state.selectedItemIds) {
+        try {
+            await api(`/items/${itemId}?delete_folder=${deleteFolder}`, { method: 'DELETE' });
+            successCount++;
+        } catch (e) {
+            console.error(`Failed to delete item ${itemId}:`, e);
+            errorCount++;
+        }
+    }
+    
+    // Exit selection mode and refresh
+    cancelSelectMode();
+    await loadItems();
+    await loadStats();
+    
+    if (errorCount > 0) {
+        alert(`Deleted ${successCount} item(s). ${errorCount} failed.`);
+    } else {
+        alert(`Successfully deleted ${successCount} item(s).`);
+    }
+}
+
+/**
+ * Toggle select all items
+ */
+function toggleSelectAll() {
+    const checkbox = document.getElementById('select-all-checkbox');
+    if (checkbox.checked) {
+        // Select all visible items
+        state.selectedItemIds = state.items.map(item => item.id);
+    } else {
+        // Deselect all
+        state.selectedItemIds = [];
+    }
+    updateSelectionCount();
+    renderItems();
 }
 
 // =============================================================================
@@ -1961,19 +2260,6 @@ document.addEventListener('DOMContentLoaded', function() {
         markAllReadBtn.addEventListener('click', markAllNotificationsRead);
     }
     
-    // Show Closed toggle
-    const showClosedCheckbox = document.getElementById('show-closed-checkbox');
-    if (showClosedCheckbox) {
-        showClosedCheckbox.addEventListener('change', (e) => {
-            state.showClosed = e.target.checked;
-            if (state.currentView === 'inbox') {
-                loadInbox();
-            } else {
-                loadItems();
-            }
-        });
-    }
-    
     // Type filter chips
     document.querySelectorAll('.filter-chip').forEach(chip => {
         chip.addEventListener('click', () => setTypeFilter(chip.dataset.value));
@@ -1984,13 +2270,27 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Items table row clicks
     document.getElementById('items-table-body').addEventListener('click', (e) => {
+        // Ignore clicks on checkboxes
+        if (e.target.type === 'checkbox') return;
+        
         const row = e.target.closest('tr');
         if (row && row.dataset.itemId) {
             const itemId = parseInt(row.dataset.itemId);
-            openDetailDrawer(itemId);
-            markItemAsRead(itemId);
+            
+            // In select mode, toggle selection instead of opening drawer
+            if (state.selectMode) {
+                toggleItemSelection(itemId);
+            } else {
+                openDetailDrawer(itemId);
+                markItemAsRead(itemId);
+            }
         }
     });
+    
+    // Selection mode buttons
+    document.getElementById('btn-select-mode').addEventListener('click', toggleSelectMode);
+    document.getElementById('btn-delete-selected').addEventListener('click', deleteSelectedItems);
+    document.getElementById('btn-cancel-select').addEventListener('click', cancelSelectMode);
     
     // Detail drawer
     document.getElementById('drawer-overlay').addEventListener('click', closeDetailDrawer);
@@ -2014,6 +2314,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-save-response').addEventListener('click', saveResponse);
     document.getElementById('btn-close-item').addEventListener('click', closeItem);
     document.getElementById('btn-reopen-item').addEventListener('click', reopenItem);
+    document.getElementById('btn-delete-item').addEventListener('click', deleteItem);
     
     // Send to Reviewer button
     document.getElementById('btn-send-to-reviewer').addEventListener('click', handleSendToReviewer);
@@ -2088,3 +2389,5 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initial auth check
     checkAuth();
 });
+// Global function aliases for onclick handlers in HTML
+window.openItem = openDetailDrawer;

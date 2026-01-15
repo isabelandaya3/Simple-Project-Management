@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QC Review Response - {{ITEM_IDENTIFIER}}</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+        }
+        h1 {
+            color: #1a1a2e;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .info-row {
+            display: flex;
+            margin-bottom: 8px;
+        }
+        .info-row:last-child { margin-bottom: 0; }
+        .info-label {
+            font-weight: 600;
+            color: #444;
+            width: 160px;
+            flex-shrink: 0;
+        }
+        .info-value {
+            color: #666;
+        }
+        .reviewer-notes-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .reviewer-notes-box h3 {
+            font-size: 14px;
+            color: #856404;
+            margin-bottom: 8px;
+        }
+        .reviewer-notes-box p {
+            color: #856404;
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+        .reviewer-files-box {
+            background: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .reviewer-files-box h3 {
+            font-size: 14px;
+            color: #004085;
+            margin-bottom: 8px;
+        }
+        .reviewer-files-box ul {
+            margin-left: 20px;
+            color: #004085;
+        }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin-bottom: 12px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: 500;
+            color: #444;
+            margin-bottom: 6px;
+        }
+        select, textarea, input[type="text"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        select:focus, textarea:focus, input[type="text"]:focus {
+            outline: none;
+            border-color: #11998e;
+            box-shadow: 0 0 0 3px rgba(17,153,142,0.1);
+        }
+        textarea { resize: vertical; min-height: 100px; }
+        .file-list {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+        }
+        .file-item:hover { background: #e9ecef; }
+        .file-item input { margin-right: 10px; flex-shrink: 0; }
+        .file-item label {
+            margin-bottom: 0;
+            font-weight: normal;
+            color: #333;
+            cursor: pointer;
+            word-break: break-all;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(17,153,142,0.4);
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .btn-secondary {
+            background: #17a2b8;
+            margin-bottom: 15px;
+        }
+        .btn-secondary:hover {
+            box-shadow: 0 5px 20px rgba(23,162,184,0.4);
+        }
+        .folder-status {
+            background: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 15px;
+            color: #004085;
+            font-size: 14px;
+        }
+        .folder-status.connected {
+            background: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .folder-status.error {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        .success-box {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            color: #155724;
+            text-align: center;
+        }
+        .hidden { display: none !important; }
+        .folder-path-display {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            background: #f8f9fa;
+            padding: 8px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+        }
+        .file-count {
+            color: #666;
+            font-size: 13px;
+            margin-top: 8px;
+        }
+        .instructions {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            color: #155724;
+            font-size: 13px;
+        }
+        .instructions ol {
+            margin-left: 20px;
+            margin-top: 8px;
+        }
+        .instructions li {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QC Review Response</h1>
+        <p class="subtitle">{{ITEM_TYPE}} {{ITEM_IDENTIFIER}}</p>
+        
+        <!-- Item Information -->
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ITEM_TITLE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{DATE_RECEIVED}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Your Due Date:</span>
+                <span class="info-value" style="color: #11998e; font-weight: bold;">{{QCR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Initial Reviewer:</span>
+                <span class="info-value">{{REVIEWER_NAME}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QC Reviewer:</span>
+                <span class="info-value">{{QCR_NAME}}</span>
+            </div>
+        </div>
+
+        <!-- Initial Reviewer's Response Info -->
+        <div class="reviewer-notes-box" id="reviewer-response-info">
+            <h3>📝 Initial Reviewer's Response</h3>
+            <p><strong>Category:</strong> {{REVIEWER_RESPONSE_CATEGORY}}</p>
+            <p style="margin-top: 8px;"><strong>Notes:</strong></p>
+            <p>{{REVIEWER_NOTES}}</p>
+        </div>
+
+        <!-- Initial Reviewer's Selected Files -->
+        <div class="reviewer-files-box" id="reviewer-files-info">
+            <h3>📎 Files Selected by Initial Reviewer</h3>
+            <ul id="reviewer-files-list">
+                {{REVIEWER_SELECTED_FILES}}
+            </ul>
+        </div>
+
+        <!-- Success Message (hidden by default) -->
+        <div id="success-message" class="success-box hidden">
+            <h3>✅ QC Review Submitted Successfully!</h3>
+            <p style="margin-top: 10px;">Your QC review has been saved to the item folder.</p>
+            <p style="margin-top: 5px; font-size: 13px;">The tracker will automatically import your response.</p>
+        </div>
+
+        <!-- Instructions -->
+        <div class="instructions" id="instructions">
+            <strong>📋 Quick Instructions:</strong>
+            <ol>
+                <li>Click <strong>"Connect to Item Folder"</strong> below and select this item's folder</li>
+                <li>Review the initial reviewer's response and select your QC decision</li>
+                <li>Select any additional files to include if needed</li>
+                <li>Click <strong>"Submit QC Review"</strong> - it will save automatically!</li>
+            </ol>
+        </div>
+
+        <!-- Folder Connection Section -->
+        <div id="folder-section">
+            <div class="folder-status" id="folder-status">
+                📁 Click the button below to connect to the item folder
+            </div>
+            <button type="button" class="btn btn-secondary" id="connect-folder-btn" onclick="connectToFolder()">
+                📂 Connect to Item Folder
+            </button>
+            <div class="folder-path-display hidden" id="folder-path-display"></div>
+        </div>
+
+        <!-- Form Section -->
+        <form id="response-form">
+            <div class="form-group">
+                <label for="qcr_decision">QC Decision *</label>
+                <select name="qcr_decision" id="qcr_decision" required disabled>
+                    <option value="">-- Select QC Decision --</option>
+                    <option value="Approved">Approved - Agree with Initial Review</option>
+                    <option value="Approved with Changes">Approved with Changes</option>
+                    <option value="Returned for Revision">Returned for Revision</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <p class="section-title">Select Additional Files (Optional)</p>
+                <p style="color: #666; font-size: 13px; margin-bottom: 10px;">
+                    Check any additional files you want to include with the QC review.
+                </p>
+                <div class="file-list" id="file-list">
+                    <p style="color: #888; padding: 8px; text-align: center;">
+                        Connect to the item folder to see available files
+                    </p>
+                </div>
+                <p class="file-count hidden" id="file-count"></p>
+            </div>
+            
+            <div class="form-group">
+                <label for="qcr_notes">QC Notes / Comments</label>
+                <textarea name="qcr_notes" id="qcr_notes" placeholder="Add any QC notes or comments..." disabled></textarea>
+            </div>
+            
+            <button type="submit" class="btn" id="submit-btn" disabled>Submit QC Review</button>
+        </form>
+    </div>
+
+    <script>
+        // =====================================================================
+        // CONFIGURATION - Populated when form is generated
+        // =====================================================================
+        const ITEM_CONFIG = {
+            item_id: {{ITEM_ID}},
+            item_type: "{{ITEM_TYPE}}",
+            identifier: "{{ITEM_IDENTIFIER}}",
+            title: "{{ITEM_TITLE}}",
+            token: "{{TOKEN}}",
+            qcr_name: "{{QCR_NAME}}",
+            qcr_email: "{{QCR_EMAIL}}",
+            reviewer_name: "{{REVIEWER_NAME}}",
+            reviewer_response_category: "{{REVIEWER_RESPONSE_CATEGORY}}",
+            folder_path: "{{FOLDER_PATH}}"
+        };
+
+        // Store the directory handle for read/write access
+        let folderHandle = null;
+        let availableFiles = [];
+
+        // =====================================================================
+        // FOLDER CONNECTION - File System Access API
+        // =====================================================================
+        async function connectToFolder() {
+            try {
+                // Check browser support
+                if (!('showDirectoryPicker' in window)) {
+                    alert('Your browser does not support folder access. Please use Microsoft Edge or Google Chrome.');
+                    return;
+                }
+
+                // Request folder access
+                folderHandle = await window.showDirectoryPicker({
+                    mode: 'readwrite'
+                });
+
+                // Read files from the folder
+                availableFiles = [];
+                for await (const entry of folderHandle.values()) {
+                    if (entry.kind === 'file') {
+                        // Skip system/hidden files and response files
+                        if (!entry.name.startsWith('.') && 
+                            !entry.name.startsWith('_') &&
+                            !entry.name.startsWith('~')) {
+                            availableFiles.push(entry.name);
+                        }
+                    }
+                }
+
+                // Sort files alphabetically
+                availableFiles.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+                // Update UI
+                updateFolderStatus(true, folderHandle.name);
+                displayFiles();
+                enableForm();
+
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    return;
+                }
+                console.error('Error connecting to folder:', err);
+                updateFolderStatus(false, err.message);
+            }
+        }
+
+        function updateFolderStatus(connected, info) {
+            const statusEl = document.getElementById('folder-status');
+            const pathDisplay = document.getElementById('folder-path-display');
+            
+            if (connected) {
+                statusEl.className = 'folder-status connected';
+                statusEl.innerHTML = '✅ Connected to folder: <strong>' + info + '</strong>';
+                pathDisplay.textContent = 'Folder: ' + info;
+                pathDisplay.classList.remove('hidden');
+                document.getElementById('connect-folder-btn').textContent = '📂 Change Folder';
+            } else {
+                statusEl.className = 'folder-status error';
+                statusEl.innerHTML = '❌ Error: ' + info;
+            }
+        }
+
+        function displayFiles() {
+            const fileList = document.getElementById('file-list');
+            const fileCount = document.getElementById('file-count');
+
+            if (availableFiles.length === 0) {
+                fileList.innerHTML = '<p style="color: #888; padding: 8px; text-align: center;">No additional files found in this folder</p>';
+                fileCount.classList.add('hidden');
+                return;
+            }
+
+            let html = '';
+            availableFiles.forEach((filename, index) => {
+                html += `
+                    <div class="file-item">
+                        <input type="checkbox" name="selected_files" value="${escapeHtml(filename)}" id="file_${index}">
+                        <label for="file_${index}">${escapeHtml(filename)}</label>
+                    </div>
+                `;
+            });
+            fileList.innerHTML = html;
+            
+            fileCount.textContent = `${availableFiles.length} file(s) found`;
+            fileCount.classList.remove('hidden');
+        }
+
+        function enableForm() {
+            document.getElementById('qcr_decision').disabled = false;
+            document.getElementById('qcr_notes').disabled = false;
+            document.getElementById('submit-btn').disabled = false;
+            document.getElementById('instructions').classList.add('hidden');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // =====================================================================
+        // FORM SUBMISSION - Save JSON directly to folder
+        // =====================================================================
+        document.getElementById('response-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            if (!folderHandle) {
+                alert('Please connect to the item folder first.');
+                return;
+            }
+
+            const decision = document.getElementById('qcr_decision').value;
+            const notes = document.getElementById('qcr_notes').value;
+            
+            if (!decision) {
+                alert('Please select a QC decision.');
+                return;
+            }
+            
+            // Gather selected files
+            const selectedFiles = [];
+            document.querySelectorAll('input[name="selected_files"]:checked').forEach(cb => {
+                selectedFiles.push(cb.value);
+            });
+            
+            // Build response JSON
+            const responseData = {
+                _form_type: "qcr_response",
+                _version: "1.0",
+                _submitted_at: new Date().toISOString(),
+                item_id: ITEM_CONFIG.item_id,
+                identifier: ITEM_CONFIG.identifier,
+                token: ITEM_CONFIG.token,
+                qcr_name: ITEM_CONFIG.qcr_name,
+                qcr_email: ITEM_CONFIG.qcr_email,
+                qcr_decision: decision,
+                additional_files: selectedFiles,
+                qcr_notes: notes
+            };
+            
+            const jsonString = JSON.stringify(responseData, null, 2);
+            
+            // Save directly to the connected folder
+            try {
+                const fileHandle = await folderHandle.getFileHandle('_qcr_response.json', { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(jsonString);
+                await writable.close();
+                
+                // Show success
+                document.getElementById('response-form').classList.add('hidden');
+                document.getElementById('folder-section').classList.add('hidden');
+                document.getElementById('success-message').classList.remove('hidden');
+                
+            } catch (err) {
+                console.error('Error saving response:', err);
+                alert('Error saving response: ' + err.message + '\n\nPlease try reconnecting to the folder.');
+            }
+        });
+    </script>
+</body>
+</html>

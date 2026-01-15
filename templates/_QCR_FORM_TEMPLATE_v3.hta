@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>QC Review - {{ITEM_IDENTIFIER}}</title>
+    <HTA:APPLICATION
+        ID="QCRResponseForm"
+        APPLICATIONNAME="QC Review Response"
+        BORDER="dialog"
+        BORDERSTYLE="normal"
+        CAPTION="yes"
+        MAXIMIZEBUTTON="yes"
+        MINIMIZEBUTTON="yes"
+        SCROLL="yes"
+        SHOWINTASKBAR="yes"
+        SINGLEINSTANCE="no"
+        SYSMENU="yes"
+        VERSION="1.0"
+        WINDOWSTATE="normal"
+    />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            padding: 40px;
+            max-width: 750px;
+            width: 100%;
+        }
+        h1 { color: #1a1a2e; font-size: 24px; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 24px; }
+        .version-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .info-row { display: flex; margin-bottom: 8px; }
+        .info-row:last-child { margin-bottom: 0; }
+        .info-label { font-weight: 600; color: #444; width: 160px; flex-shrink: 0; }
+        .info-value { color: #666; }
+        
+        /* Reviewer Response Box */
+        .reviewer-response-box {
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .reviewer-response-box h3 {
+            margin: 0 0 12px 0;
+            color: #166534;
+            font-size: 15px;
+        }
+        .response-text-readonly {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 12px;
+            white-space: pre-wrap;
+            color: #666;
+            min-height: 60px;
+            margin-top: 8px;
+        }
+        
+        /* QC Action Group */
+        .action-group {
+            background: #fef3c7;
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .action-group h3 {
+            margin: 0 0 12px 0;
+            color: #92400e;
+            font-size: 15px;
+        }
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .radio-option {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 12px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+            cursor: pointer;
+        }
+        .radio-option:hover { border-color: #667eea; background: #fafafa; }
+        .radio-option input[type="radio"] { margin-top: 3px; width: 18px; height: 18px; }
+        .radio-option-content { flex: 1; }
+        .radio-option-label { font-weight: 600; color: #333; }
+        .radio-option-desc { font-size: 12px; color: #666; margin-top: 4px; }
+        
+        /* Send Back Warning */
+        .send-back-warning {
+            display: none;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 15px;
+            color: #991b1b;
+        }
+        
+        /* Response Mode Section */
+        .response-mode-group {
+            display: none;
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .response-mode-group h4 {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #333;
+        }
+        
+        .form-group { margin-bottom: 20px; }
+        label { display: block; font-weight: 500; color: #444; margin-bottom: 6px; }
+        select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        select:focus, textarea:focus {
+            outline: none;
+            border-color: #11998e;
+        }
+        textarea { resize: vertical; min-height: 100px; }
+        
+        /* File Section */
+        .file-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .file-list { max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            background: white;
+        }
+        .file-item:hover { background: #e9ecef; }
+        .file-item input[type="checkbox"] { margin-right: 10px; width: 18px; height: 18px; }
+        .file-item label { margin-bottom: 0; font-weight: normal; color: #333; cursor: pointer; flex: 1; }
+        
+        .btn {
+            display: inline-block;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        .btn:hover { opacity: 0.9; }
+        .btn-approve { background: #10b981; }
+        .btn-sendback { background: #f59e0b; }
+        
+        .success-box {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            color: #155724;
+            text-align: center;
+        }
+        .hidden { display: none !important; }
+        
+        .folder-info {
+            background: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        .folder-info strong { color: #004085; }
+        .folder-path {
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            background: #f8f9fa;
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+            display: block;
+        }
+        .open-folder-btn {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .open-folder-btn:hover { background: #138496; }
+        
+        .category-group { display: none; }
+        
+        #response_text_area { display: none; }
+        
+        .notes-required { display: none; color: #dc2626; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QC Review <span class="version-badge">v{{RESPONSE_VERSION}}</span></h1>
+        <p class="subtitle">{{ITEM_TYPE}} {{ITEM_IDENTIFIER}}</p>
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ITEM_TITLE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{DATE_RECEIVED}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due Date:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Priority:</span>
+                <span class="info-value">{{PRIORITY}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Initial Reviewer:</span>
+                <span class="info-value">{{REVIEWER_NAME}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Your Due Date:</span>
+                <span class="info-value" style="color: #d97706; font-weight: bold;">{{QCR_DUE_DATE}}</span>
+            </div>
+        </div>
+
+        <div class="folder-info">
+            <strong>Item Folder:</strong>
+            <span class="folder-path" id="folder-path">{{FOLDER_PATH_RAW}}</span>
+            <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
+        </div>
+
+        <!-- Reviewer's Submitted Response -->
+        <div class="reviewer-response-box">
+            <h3>Initial Reviewer's Submitted Response</h3>
+            <div class="info-row">
+                <span class="info-label">Category:</span>
+                <span class="info-value" style="font-weight: 600; color: #166534;">{{REVIEWER_RESPONSE_CATEGORY}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Selected Files:</span>
+                <span class="info-value">{{REVIEWER_SELECTED_FILES_TEXT}}</span>
+            </div>
+            <div style="margin-top: 12px;">
+                <span class="info-label">Reviewer's Notes:</span>
+                <div class="response-text-readonly" id="reviewer_notes_display">{{REVIEWER_NOTES}}</div>
+            </div>
+        </div>
+
+        <div id="success-message" class="success-box hidden"></div>
+
+        <form id="response-form">
+            <!-- QC Action Selection -->
+            <div class="action-group">
+                <h3>Your QC Decision</h3>
+                <div class="radio-group">
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Approve" onclick="handleActionChange('Approve')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Approve</div>
+                            <div class="radio-option-desc">Accept the reviewer's response as final. No changes needed.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Modify" onclick="handleActionChange('Modify')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Modify</div>
+                            <div class="radio-option-desc">Make adjustments to the response. You can tweak or revise the text.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Send Back" onclick="handleActionChange('Send Back')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Send Back to Reviewer</div>
+                            <div class="radio-option-desc">Return to the reviewer for revisions. You'll specify what needs to change.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="send-back-warning" id="send-back-warning">
+                <strong>Sending Back:</strong> The item will be returned to the Initial Reviewer for revision. They will receive an email with your notes explaining what changes are needed.
+            </div>
+            
+            <!-- Response Text Handling (shown only for Approve/Modify) -->
+            <div class="response-mode-group" id="response-mode-group">
+                <h4>Response Text Handling</h4>
+                <div class="radio-group">
+                    <label class="radio-option">
+                        <input type="radio" name="response_mode" value="Keep" checked onclick="handleModeChange('Keep')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Keep as is</div>
+                            <div class="radio-option-desc">Use the reviewer's original response text without changes.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="response_mode" value="Tweak" onclick="handleModeChange('Tweak')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Tweak</div>
+                            <div class="radio-option-desc">Start with the reviewer's text and make minor edits.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="response_mode" value="Revise" onclick="handleModeChange('Revise')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Revise</div>
+                            <div class="radio-option-desc">Write a completely new response from scratch.</div>
+                        </div>
+                    </label>
+                </div>
+                
+                <div style="margin-top: 15px;">
+                    <div style="font-weight: 600; margin-bottom: 8px; color: #333;">Final Response Text:</div>
+                    <div class="response-text-readonly" id="response_text_readonly">{{REVIEWER_NOTES}}</div>
+                    <textarea id="response_text_area" placeholder="Enter your response text...">{{REVIEWER_NOTES}}</textarea>
+                </div>
+            </div>
+            
+            <!-- Final Response Category (shown only for Approve/Modify) -->
+            <div class="form-group category-group" id="category-group">
+                <label for="response_category">Final Response Category *</label>
+                <select name="response_category" id="response_category">
+                    <option value="">-- Select --</option>
+                    <option value="Approved">Approved</option>
+                    <option value="Approved as Noted">Approved as Noted</option>
+                    <option value="For Record Only">For Record Only</option>
+                    <option value="Rejected">Rejected</option>
+                    <option value="Revise and Resubmit">Revise and Resubmit</option>
+                </select>
+            </div>
+            
+            <!-- File Selection (shown only for Approve/Modify) -->
+            <div class="file-section" id="files-group">
+                <p style="font-size: 16px; font-weight: 600; color: #1a1a2e; margin-bottom: 8px;">Confirm Files to Include in Response</p>
+                <p style="color: #666; font-size: 13px; margin-bottom: 12px;">Files selected by the Initial Reviewer are pre-checked. You can adjust as needed.</p>
+                <div class="file-list" id="file-list">
+                    <p style="color: #888; padding: 8px; text-align: center;">Loading files...</p>
+                </div>
+                
+                <button type="button" onclick="loadFolderFiles()" style="margin-top: 10px; padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;">Refresh File List</button>
+                <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
+            </div>
+            
+            <!-- QC Notes (always shown) -->
+            <div class="form-group">
+                <label for="qcr_notes">QC Notes / Comments <span class="notes-required" id="notes-required">* Required for Send Back</span></label>
+                <textarea name="qcr_notes" id="qcr_notes" placeholder="Add any QC notes, conditions, or explain what changes are needed..."></textarea>
+            </div>
+            
+            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Complete QC Review</button>
+        </form>
+    </div>
+
+    <script language="JavaScript">
+        var ITEM_CONFIG = {
+            item_id: {{ITEM_ID}},
+            item_type: "{{ITEM_TYPE}}",
+            identifier: "{{ITEM_IDENTIFIER}}",
+            title: "{{ITEM_TITLE}}",
+            token: "{{TOKEN}}",
+            qcr_name: "{{QCR_NAME}}",
+            qcr_email: "{{QCR_EMAIL}}",
+            reviewer_name: "{{REVIEWER_NAME}}",
+            reviewer_response_category: "{{REVIEWER_RESPONSE_CATEGORY}}",
+            response_version: {{RESPONSE_VERSION}},
+            folder_path: "{{FOLDER_PATH}}"
+        };
+        
+        // Reviewer's selected files (from template)
+        var REVIEWER_FILES = [{{REVIEWER_SELECTED_FILES_JS}}];
+        
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var shell = new ActiveXObject("WScript.Shell");
+        
+        var originalReviewerText = "";
+        
+        function getFolderPath() {
+            return document.getElementById("folder-path").innerText;
+        }
+
+        window.onload = function() {
+            // Get original reviewer text from notes
+            var notesEl = document.getElementById("reviewer_notes_display");
+            if (notesEl) {
+                originalReviewerText = notesEl.innerText || "";
+            }
+            if (originalReviewerText === "No notes provided" || originalReviewerText === "None") {
+                originalReviewerText = "";
+            }
+            
+            // Pre-select the reviewer's response category
+            var catSelect = document.getElementById("response_category");
+            var reviewerCat = ITEM_CONFIG.reviewer_response_category;
+            for (var i = 0; i < catSelect.options.length; i++) {
+                if (catSelect.options[i].value === reviewerCat) {
+                    catSelect.selectedIndex = i;
+                    break;
+                }
+            }
+            
+            loadFolderFiles();
+        };
+        
+        function openFolder() {
+            var folderPath = getFolderPath();
+            if (fso.FolderExists(folderPath)) {
+                shell.Run('explorer.exe "' + folderPath + '"', 1, false);
+            } else {
+                alert("Folder not found: " + folderPath);
+            }
+        }
+        
+        function handleActionChange(action) {
+            var responseModeGroup = document.getElementById("response-mode-group");
+            var categoryGroup = document.getElementById("category-group");
+            var filesGroup = document.getElementById("files-group");
+            var sendBackWarning = document.getElementById("send-back-warning");
+            var notesRequired = document.getElementById("notes-required");
+            var submitBtn = document.getElementById("submit-btn");
+            
+            if (action === "Send Back") {
+                responseModeGroup.style.display = "none";
+                categoryGroup.style.display = "none";
+                filesGroup.style.display = "none";
+                sendBackWarning.style.display = "block";
+                notesRequired.style.display = "inline";
+                submitBtn.innerHTML = "Send Back to Reviewer";
+                submitBtn.className = "btn btn-sendback";
+            } else {
+                responseModeGroup.style.display = "block";
+                categoryGroup.style.display = "block";
+                filesGroup.style.display = "block";
+                sendBackWarning.style.display = "none";
+                notesRequired.style.display = "none";
+                
+                if (action === "Approve") {
+                    submitBtn.innerHTML = "Approve &amp; Complete";
+                    submitBtn.className = "btn btn-approve";
+                } else {
+                    submitBtn.innerHTML = "Submit Modifications";
+                    submitBtn.className = "btn";
+                }
+            }
+        }
+        
+        function handleModeChange(mode) {
+            var textReadonly = document.getElementById("response_text_readonly");
+            var textArea = document.getElementById("response_text_area");
+            
+            if (mode === "Keep") {
+                textReadonly.style.display = "block";
+                textArea.style.display = "none";
+                textArea.value = originalReviewerText;
+            } else if (mode === "Tweak") {
+                textReadonly.style.display = "none";
+                textArea.style.display = "block";
+                textArea.value = originalReviewerText;
+            } else if (mode === "Revise") {
+                textReadonly.style.display = "none";
+                textArea.style.display = "block";
+                textArea.value = "";
+                textArea.placeholder = "Write your new response text here...";
+            }
+        }
+        
+        function loadFolderFiles() {
+            var folderPath = getFolderPath();
+            var fileListEl = document.getElementById("file-list");
+            
+            if (!fso.FolderExists(folderPath)) {
+                fileListEl.innerHTML = "<p style='color: #dc3545; padding: 8px;'>Folder not found</p>";
+                return;
+            }
+            
+            var folder = fso.GetFolder(folderPath);
+            var files = new Enumerator(folder.Files);
+            var html = "";
+            var count = 0;
+            
+            for (; !files.atEnd(); files.moveNext()) {
+                var file = files.item();
+                var ext = fso.GetExtensionName(file.Name).toLowerCase();
+                // Only show PDFs, exclude system files starting with _ or ~
+                if (ext === "pdf" && file.Name.charAt(0) !== "_" && file.Name.charAt(0) !== "~") {
+                    // Check if this file was selected by reviewer
+                    var isReviewerFile = false;
+                    for (var j = 0; j < REVIEWER_FILES.length; j++) {
+                        if (REVIEWER_FILES[j] === file.Name) {
+                            isReviewerFile = true;
+                            break;
+                        }
+                    }
+                    
+                    html += "<div class='file-item'>" +
+                        "<input type='checkbox' name='selected_files' value='" + file.Name + "' id='file_" + count + "'" + (isReviewerFile ? " checked" : "") + ">" +
+                        "<label for='file_" + count + "'>" + file.Name + (isReviewerFile ? " <span style='color:#166534; font-size:11px;'>(reviewer selected)</span>" : "") + "</label>" +
+                        "</div>";
+                    count++;
+                }
+            }
+            
+            if (count === 0) {
+                html = "<p style='color: #888; padding: 8px; text-align: center;'>No PDF files in folder</p>";
+            }
+            
+            fileListEl.innerHTML = html;
+        }
+
+        function submitResponse() {
+            // Get selected action
+            var actionRadios = document.getElementsByName("qc_action");
+            var action = "";
+            for (var i = 0; i < actionRadios.length; i++) {
+                if (actionRadios[i].checked) {
+                    action = actionRadios[i].value;
+                    break;
+                }
+            }
+            
+            if (!action) {
+                alert("Please select a QC decision.");
+                return;
+            }
+            
+            var notes = document.getElementById("qcr_notes").value;
+            
+            // Validate based on action
+            if (action === "Send Back") {
+                if (!notes.trim()) {
+                    alert("Please provide notes explaining what revisions are needed.");
+                    return;
+                }
+            } else {
+                var category = document.getElementById("response_category").value;
+                if (!category) {
+                    alert("Please select a final response category.");
+                    return;
+                }
+            }
+            
+            // Get response mode and text
+            var responseMode = "Keep";
+            var modeRadios = document.getElementsByName("response_mode");
+            for (var i = 0; i < modeRadios.length; i++) {
+                if (modeRadios[i].checked) {
+                    responseMode = modeRadios[i].value;
+                    break;
+                }
+            }
+            
+            var finalResponseText = "";
+            if (action !== "Send Back") {
+                if (responseMode === "Keep") {
+                    finalResponseText = originalReviewerText;
+                } else {
+                    finalResponseText = document.getElementById("response_text_area").value;
+                }
+            }
+            
+            // Gather selected files
+            var selectedFiles = [];
+            if (action !== "Send Back") {
+                var checkboxes = document.querySelectorAll('input[name="selected_files"]:checked');
+                for (var i = 0; i < checkboxes.length; i++) {
+                    selectedFiles.push(checkboxes[i].value);
+                }
+            }
+            
+            // Build response object
+            var response = {
+                _form_type: "qcr_response",
+                _version: "1.0",
+                _submitted_at: new Date().toISOString(),
+                item_id: ITEM_CONFIG.item_id,
+                identifier: ITEM_CONFIG.identifier,
+                token: ITEM_CONFIG.token,
+                qcr_name: ITEM_CONFIG.qcr_name,
+                qcr_email: ITEM_CONFIG.qcr_email,
+                qc_action: action,
+                response_mode: responseMode,
+                response_category: action !== "Send Back" ? document.getElementById("response_category").value : null,
+                response_text: finalResponseText,
+                selected_files: selectedFiles,
+                qcr_notes: notes
+            };
+            
+            var jsonString = JSON.stringify(response, null, 2);
+            
+            // Save to Responses folder using folder path from config
+            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            var filePath = responsesFolder + "\\_qcr_response.json";
+            
+            try {
+                // Ensure Responses folder exists
+                if (!fso.FolderExists(responsesFolder)) {
+                    fso.CreateFolder(responsesFolder);
+                }
+                
+                var file = fso.CreateTextFile(filePath, true, false);
+                file.Write(jsonString);
+                file.Close();
+                
+                // Success message based on action
+                var successMsg = "";
+                if (action === "Send Back") {
+                    successMsg = '<h3>Sent Back to Reviewer</h3>' +
+                        '<p style="margin-top: 10px;">The item has been returned to the Initial Reviewer for revisions.</p>' +
+                        '<p style="margin-top: 5px; font-size: 13px;">They will receive an email with your feedback.</p>';
+                } else if (action === "Approve") {
+                    successMsg = '<h3>QC Review Approved!</h3>' +
+                        '<p style="margin-top: 10px;">The response has been approved and finalized.</p>' +
+                        '<p style="margin-top: 5px; font-size: 13px;">The tracker will automatically process this response.</p>';
+                } else {
+                    successMsg = '<h3>QC Modifications Submitted!</h3>' +
+                        '<p style="margin-top: 10px;">Your modifications have been saved.</p>' +
+                        '<p style="margin-top: 5px; font-size: 13px;">The tracker will automatically process this response.</p>';
+                }
+                
+                document.getElementById('response-form').className = 'hidden';
+                document.getElementById('success-message').innerHTML = successMsg +
+                    '<button class="open-folder-btn" onclick="openResponsesFolder()" style="margin-top: 15px;">View in Folder</button>';
+                document.getElementById('success-message').className = 'success-box';
+            } catch (e) {
+                alert("Error saving response: " + e.message + "\\nPath: " + filePath);
+            }
+        }
+        
+        function openResponsesFolder() {
+            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            shell.Run('explorer.exe "' + responsesFolder + '"', 1, false);
+        }
+    </script>
+        }
+    </script>
+</body>
+</html>

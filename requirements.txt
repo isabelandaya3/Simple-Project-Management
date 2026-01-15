@@ -16,6 +16,9 @@ pywin32>=306
 # Windows toast notifications (optional)
 winotify>=1.1.0
 
+# Airtable integration for remote form submissions (optional)
+requests>=2.31.0
+
 # Note: pywin32 is only needed on Windows for Outlook integration.
 # If you're developing on another platform, you can comment it out,
 # but the email polling feature will be disabled.
