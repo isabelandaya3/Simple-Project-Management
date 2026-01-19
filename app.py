@@ -281,6 +281,119 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SECURE'] = False  # Set True if using HTTPS
 
 # =============================================================================
+# EMAIL RETRY QUEUE - For handling failed email sends
+# =============================================================================
+
+# In-memory queue of pending emails to retry
+PENDING_EMAILS = []
+PENDING_EMAILS_LOCK = threading.Lock()
+MAX_EMAIL_RETRIES = 3
+
+def queue_pending_email(email_type, item_id, **kwargs):
+    """Add an email to the retry queue."""
+    with PENDING_EMAILS_LOCK:
+        # Check if already queued
+        for pending in PENDING_EMAILS:
+            if pending['email_type'] == email_type and pending['item_id'] == item_id:
+                return  # Already queued
+        
+        PENDING_EMAILS.append({
+            'email_type': email_type,
+            'item_id': item_id,
+            'retries': 0,
+            'last_attempt': None,
+            'kwargs': kwargs
+        })
+        print(f"  [EmailQueue] Queued {email_type} for item {item_id}")
+
+def send_email_with_retry(send_func, item_id, email_type, max_retries=3, **kwargs):
+    """Try to send an email with retry logic. Queue for later if all retries fail."""
+    import time as time_module
+    
+    for attempt in range(max_retries):
+        try:
+            result = send_func(item_id, **kwargs)
+            if result.get('success'):
+                return result
+            else:
+                error = result.get('error', 'Unknown error')
+                # If it's an RPC/COM error, retry
+                if 'remote procedure call' in str(error).lower() or '-2147' in str(error):
+                    if attempt < max_retries - 1:
+                        print(f"  [EmailRetry] Attempt {attempt + 1} failed for {email_type} item {item_id}: {error}. Retrying...")
+                        time_module.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                        continue
+                return result  # Non-recoverable error
+        except Exception as e:
+            error_str = str(e)
+            if 'remote procedure call' in error_str.lower() or '-2147' in error_str:
+                if attempt < max_retries - 1:
+                    print(f"  [EmailRetry] Attempt {attempt + 1} exception for {email_type} item {item_id}: {e}. Retrying...")
+                    time_module.sleep(2 ** attempt)
+                    continue
+            return {'success': False, 'error': str(e)}
+    
+    # All retries failed, queue for later
+    queue_pending_email(email_type, item_id, **kwargs)
+    return {'success': False, 'error': 'All retries failed, queued for later', 'queued': True}
+
+def process_pending_emails():
+    """Process any pending emails in the queue. Called by folder watcher."""
+    with PENDING_EMAILS_LOCK:
+        if not PENDING_EMAILS:
+            return
+        
+        to_remove = []
+        for pending in PENDING_EMAILS:
+            # Skip if attempted recently (wait at least 30 seconds between attempts)
+            if pending['last_attempt']:
+                elapsed = (datetime.now() - pending['last_attempt']).total_seconds()
+                if elapsed < 30:
+                    continue
+            
+            pending['last_attempt'] = datetime.now()
+            pending['retries'] += 1
+            
+            email_type = pending['email_type']
+            item_id = pending['item_id']
+            kwargs = pending.get('kwargs', {})
+            
+            print(f"  [EmailQueue] Retrying {email_type} for item {item_id} (attempt {pending['retries']})")
+            
+            try:
+                if email_type == 'multi_reviewer_qcr':
+                    result = send_multi_reviewer_qcr_email(item_id)
+                elif email_type == 'qcr_assignment':
+                    result = send_qcr_assignment_email(item_id, **kwargs)
+                elif email_type == 'multi_reviewer_sendback':
+                    result = send_multi_reviewer_sendback_emails(item_id, kwargs.get('feedback', ''), kwargs.get('reviewer_ids'))
+                else:
+                    print(f"  [EmailQueue] Unknown email type: {email_type}")
+                    to_remove.append(pending)
+                    continue
+                
+                if result.get('success'):
+                    print(f"  [EmailQueue] Successfully sent {email_type} for item {item_id}")
+                    to_remove.append(pending)
+                elif pending['retries'] >= MAX_EMAIL_RETRIES:
+                    print(f"  [EmailQueue] Giving up on {email_type} for item {item_id} after {MAX_EMAIL_RETRIES} attempts")
+                    to_remove.append(pending)
+                    # Create a notification about the failed email
+                    create_notification(
+                        'email_failed',
+                        f'⚠️ Email Failed: Item {item_id}',
+                        f'Failed to send {email_type} email after {MAX_EMAIL_RETRIES} attempts. Please send manually.',
+                        item_id=item_id
+                    )
+            except Exception as e:
+                print(f"  [EmailQueue] Error retrying {email_type} for item {item_id}: {e}")
+                if pending['retries'] >= MAX_EMAIL_RETRIES:
+                    to_remove.append(pending)
+        
+        for pending in to_remove:
+            PENDING_EMAILS.remove(pending)
+
+# =============================================================================
 # HTML TEMPLATES FOR MAGIC-LINK RESPONSE PAGES
 # =============================================================================
 
@@ -617,7 +730,7 @@ REVIEWER_RESPONSE_TEMPLATE = '''
                 <span class="info-value">{{ item.date_received or 'N/A' }}</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Your Due Date:</span>
+                <span class="info-label">Initial Review Due Date:</span>
                 <span class="info-value">{{ item.initial_reviewer_due_date or 'N/A' }}</span>
             </div>
             <div class="info-row">
@@ -658,8 +771,13 @@ REVIEWER_RESPONSE_TEMPLATE = '''
             </div>
             
             <div class="form-group">
-                <label for="notes">Notes / Comments</label>
-                <textarea name="notes" id="notes" placeholder="Add any notes for the QC Reviewer and project record...">{{ previous_response.text if previous_response else '' }}</textarea>
+                <label for="notes">Description</label>
+                <textarea name="notes" id="notes" placeholder="Provide response description for the official record...">{{ previous_response.text if previous_response else '' }}</textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="internal_notes" id="internal_notes" placeholder="Add any internal notes for the QC Reviewer...">{{ item.reviewer_internal_notes or '' }}</textarea>
             </div>
             
             <button type="submit" class="btn">{% if is_resubmit %}Submit Revision (v{{ version }}){% else %}Submit Review{% endif %}</button>
@@ -798,10 +916,6 @@ QCR_RESPONSE_TEMPLATE = '''
                 <span class="info-value">{{ item.date_received or 'N/A' }}</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Contractor Due Date:</span>
-                <span class="info-value">{{ item.due_date or 'N/A' }}</span>
-            </div>
-            <div class="info-row">
                 <span class="info-label">Priority:</span>
                 <span class="info-value">{{ item.priority or 'Normal' }}</span>
             </div>
@@ -810,8 +924,16 @@ QCR_RESPONSE_TEMPLATE = '''
                 <span class="info-value">{{ item.reviewer_name or 'N/A' }}</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Your Due Date:</span>
+                <span class="info-label">QC Reviewer:</span>
+                <span class="info-value">{{ item.qcr_name or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QC Due Date:</span>
                 <span class="info-value" style="color: #d97706;">{{ item.qcr_due_date or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due Date:</span>
+                <span class="info-value">{{ item.due_date or 'N/A' }}</span>
             </div>
             <div class="info-row">
                 <span class="info-label">Folder:</span>
@@ -832,8 +954,14 @@ QCR_RESPONSE_TEMPLATE = '''
             </div>
             {% if item.reviewer_notes %}
             <div class="info-row" style="flex-direction: column; align-items: flex-start;">
-                <span class="info-label">Reviewer's Notes:</span>
+                <span class="info-label">Reviewer's Description:</span>
                 <div class="response-text-readonly" style="margin-top: 8px; width: 100%;">{{ item.reviewer_notes }}</div>
+            </div>
+            {% endif %}
+            {% if item.reviewer_internal_notes %}
+            <div style="margin-top: 12px; padding: 10px; background: #fff8e6; border: 1px solid #ffd966; border-radius: 6px;">
+                <span class="info-label" style="color: #b7791f;">🔒 Reviewer's Internal Notes (Team Only):</span>
+                <div style="margin-top: 6px; color: #744210; white-space: pre-wrap;">{{ item.reviewer_internal_notes }}</div>
             </div>
             {% endif %}
             {% if item.reviewer_response_text %}
@@ -907,7 +1035,7 @@ QCR_RESPONSE_TEMPLATE = '''
                 </div>
                 
                 <div class="response-text-container" id="response-text-container">
-                    <div class="response-text-label">Final Response Text:</div>
+                    <div class="response-text-label">Description (Final Response Text): <span id="notes-required-hint" style="display: none; color: #dc2626;">* Required for Send Back</span></div>
                     <div class="response-text-readonly" id="response_text_readonly">{{ item.reviewer_response_text or item.reviewer_notes or '' }}</div>
                     <textarea name="response_text" id="response_text_area" placeholder="Enter your response text...">{{ item.reviewer_response_text or item.reviewer_notes or '' }}</textarea>
                 </div>
@@ -945,10 +1073,10 @@ QCR_RESPONSE_TEMPLATE = '''
                 </div>
             </div>
             
-            <!-- QC Notes (always shown) -->
+            <!-- QC Internal Notes (always shown) -->
             <div class="form-group">
-                <label for="qcr_notes">QC Notes / Comments <span id="notes-required-hint" style="display: none; color: #dc2626;">* Required for Send Back</span></label>
-                <textarea name="qcr_notes" id="qcr_notes" placeholder="Add any QC notes, conditions, or explain what changes are needed..."></textarea>
+                <label for="qcr_internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="qcr_internal_notes" id="qcr_internal_notes" placeholder="Add any internal notes for project records..."></textarea>
             </div>
             
             <button type="submit" class="btn" id="submit-btn">Complete QC Review</button>
@@ -964,7 +1092,6 @@ QCR_RESPONSE_TEMPLATE = '''
         const notesRequiredHint = document.getElementById('notes-required-hint');
         const responseTextReadonly = document.getElementById('response_text_readonly');
         const responseTextArea = document.getElementById('response_text_area');
-        const qcrNotes = document.getElementById('qcr_notes');
         const submitBtn = document.getElementById('submit-btn');
         const categorySelect = document.getElementById('response_category');
         
@@ -979,18 +1106,25 @@ QCR_RESPONSE_TEMPLATE = '''
                     filesGroup.style.display = 'none';
                     sendBackWarning.style.display = 'block';
                     notesRequiredHint.style.display = 'inline';
-                    qcrNotes.required = true;
                     categorySelect.required = false;
                     submitBtn.textContent = '↩️ Send Back to Reviewer';
                     submitBtn.style.background = '#f59e0b';
+                    // Show textarea for Send Back explanation
+                    responseTextReadonly.style.display = 'none';
+                    responseTextArea.style.display = 'block';
+                    responseTextArea.value = '';
+                    responseTextArea.placeholder = 'Explain what revisions are needed...';
                 } else {
                     responseModeGroup.style.display = 'block';
                     categoryGroup.style.display = 'block';
                     filesGroup.style.display = 'block';
                     sendBackWarning.style.display = 'none';
                     notesRequiredHint.style.display = 'none';
-                    qcrNotes.required = false;
                     categorySelect.required = true;
+                    // Reset to Keep mode display
+                    responseTextReadonly.style.display = 'block';
+                    responseTextArea.style.display = 'none';
+                    responseTextArea.value = reviewerText;
                     
                     if (action === 'Approve') {
                         submitBtn.textContent = '✅ Approve & Complete';
@@ -1035,9 +1169,9 @@ QCR_RESPONSE_TEMPLATE = '''
                 return false;
             }
             
-            if (action === 'Send Back' && !qcrNotes.value.trim()) {
+            if (action === 'Send Back' && !responseTextArea.value.trim()) {
                 e.preventDefault();
-                alert('Please provide notes explaining what revisions are needed.');
+                alert('Please provide a description explaining what revisions are needed.');
                 return false;
             }
             
@@ -1045,6 +1179,523 @@ QCR_RESPONSE_TEMPLATE = '''
                 e.preventDefault();
                 alert('Please select a final response category.');
                 return false;
+            }
+        });
+    </script>
+</body>
+</html>
+'''
+
+# =============================================================================
+# MULTI-REVIEWER FORM TEMPLATES
+# =============================================================================
+
+MULTI_REVIEWER_RESPONSE_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Review Response - {{ item.type }} {{ item.identifier }}</title>
+    ''' + BASE_PAGE_STYLE + '''
+    <style>
+        .version-badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .reviewer-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .bluebeam-notice {
+            background: #dbeafe;
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .bluebeam-notice h3 {
+            margin: 0 0 8px 0;
+            color: #1e40af;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .bluebeam-notice p {
+            color: #1e40af;
+            margin: 0;
+        }
+        .qcr-feedback {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .qcr-feedback h4 {
+            margin: 0 0 10px 0;
+            color: #991b1b;
+        }
+        .previous-response {
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .previous-response h4 {
+            margin: 0 0 10px 0;
+            color: #0369a1;
+        }
+        .waiting-notice {
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .waiting-notice h3 {
+            margin: 0 0 8px 0;
+            color: #92400e;
+        }
+        .closed-notice {
+            background: #f3f4f6;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+        .closed-notice h3 {
+            color: #6b7280;
+            margin: 0 0 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Initial Review Response <span class="version-badge">v{{ version }}</span></h1>
+        <p class="subtitle">{{ item.type }} {{ item.identifier }}</p>
+        <p><span class="reviewer-badge">👤 {{ reviewer_name }}</span></p>
+        
+        {% if is_closed %}
+        <div class="closed-notice">
+            <h3>🔒 This Item Has Been Closed</h3>
+            <p>No further changes can be submitted. Contact the project administrator if this is unexpected.</p>
+        </div>
+        {% elif not can_submit %}
+        <div class="closed-notice">
+            <h3>⚠️ Submission Not Allowed</h3>
+            <p>This item has been finalized in QC. Contact the project administrator if additional changes are required.</p>
+        </div>
+        {% else %}
+        
+        {% if is_resubmit and qcr_feedback %}
+        <div class="qcr-feedback">
+            <h4>↩️ QC Reviewer Requested Revisions</h4>
+            <p><strong>Feedback:</strong></p>
+            <div style="background: white; padding: 10px; border-radius: 4px; margin-top: 8px;">
+                {{ qcr_feedback|replace('\\n', '<br>')|safe }}
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if is_resubmit and previous_response %}
+        <div class="previous-response">
+            <h4>📄 Your Previous Response (v{{ version - 1 }})</h4>
+            <p><strong>Category:</strong> {{ previous_response.category or 'N/A' }}</p>
+            {% if previous_response.notes %}
+            <p><strong>Internal Notes:</strong></p>
+            <div style="background: white; padding: 10px; border-radius: 4px; margin-top: 8px;">
+                {{ previous_response.notes|replace('\\n', '<br>')|safe }}
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ item.title or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{ item.date_received or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Review Due Date:</span>
+                <span class="info-value">{{ item.initial_reviewer_due_date or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Folder:</span>
+                <span class="info-value">{{ item.folder_link or 'N/A' }}</span>
+            </div>
+        </div>
+        
+        <!-- Bluebeam Notice instead of file selection -->
+        <div class="bluebeam-notice">
+            <h3>📐 Markups Instructions</h3>
+            <p><strong>Provide markups in the corresponding Bluebeam session.</strong></p>
+            <p style="margin-top: 8px; font-size: 13px;">Do not attach files here. All markups should be completed in the shared Bluebeam Studio session for this item.</p>
+        </div>
+        
+        <form method="POST">
+            <input type="hidden" name="token" value="{{ token }}">
+            
+            <div class="form-group">
+                <label for="response_category">Response Category *</label>
+                <select name="response_category" id="response_category" required>
+                    <option value="">-- Select --</option>
+                    <option value="Approved" {% if previous_response and previous_response.category == 'Approved' %}selected{% endif %}>Approved</option>
+                    <option value="Approved as Noted" {% if previous_response and previous_response.category == 'Approved as Noted' %}selected{% endif %}>Approved as Noted</option>
+                    <option value="For Record Only" {% if previous_response and previous_response.category == 'For Record Only' %}selected{% endif %}>For Record Only</option>
+                    <option value="Rejected" {% if previous_response and previous_response.category == 'Rejected' %}selected{% endif %}>Rejected</option>
+                    <option value="Revise and Resubmit" {% if previous_response and previous_response.category == 'Revise and Resubmit' %}selected{% endif %}>Revise and Resubmit</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="internal_notes">Internal Notes for QC Reviewer <span style="font-weight: normal; color: #888;">(team only - not shared externally)</span></label>
+                <textarea name="internal_notes" id="internal_notes" placeholder="Add any notes, concerns, or recommendations for the QC Reviewer...">{{ previous_response.notes if previous_response else '' }}</textarea>
+            </div>
+            
+            <button type="submit" class="btn">{% if is_resubmit %}Submit Revision (v{{ version }}){% else %}Submit Review{% endif %}</button>
+        </form>
+        
+        {% if pending_reviewers %}
+        <div class="waiting-notice" style="margin-top: 24px;">
+            <h3>⏳ Other Reviewers</h3>
+            <p>This item is assigned to multiple reviewers. The QC Reviewer will be notified once all reviewers submit.</p>
+            <ul style="margin-top: 8px; color: #92400e;">
+                {% for r in all_reviewers %}
+                <li>{{ r.reviewer_name }} - {% if r.response_at %}✅ Submitted{% else %}⏳ Pending{% endif %}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</body>
+</html>
+'''
+
+MULTI_REVIEWER_QCR_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>QC Review - {{ item.type }} {{ item.identifier }}</title>
+    ''' + BASE_PAGE_STYLE + '''
+    <style>
+        .reviewer-response-box {
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .reviewer-response-box h4 {
+            margin: 0 0 12px 0;
+            color: #166534;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .reviewer-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .category-chip {
+            display: inline-block;
+            background: #e0e7ff;
+            color: #3730a3;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .bluebeam-notice {
+            background: #dbeafe;
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .bluebeam-notice h3 {
+            margin: 0 0 8px 0;
+            color: #1e40af;
+        }
+        .action-group {
+            background: #fef3c7;
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .action-group h3 {
+            margin: 0 0 12px 0;
+            color: #92400e;
+        }
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .radio-option {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+            cursor: pointer;
+        }
+        .radio-option:hover {
+            border-color: #667eea;
+        }
+        .radio-option input[type="radio"] {
+            margin-top: 3px;
+        }
+        .radio-option-content {
+            flex: 1;
+        }
+        .radio-option-label {
+            font-weight: 600;
+            color: #333;
+        }
+        .radio-option-desc {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .send-back-warning {
+            display: none;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 15px;
+            color: #991b1b;
+        }
+        .internal-notes-box {
+            background: #fff8e6;
+            border: 1px solid #ffd966;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+        .internal-notes-box h5 {
+            margin: 0 0 6px 0;
+            color: #744210;
+            font-size: 12px;
+        }
+        .internal-notes-content {
+            color: #744210;
+            font-size: 13px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QC Review</h1>
+        <p class="subtitle">{{ item.type }} {{ item.identifier }}</p>
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ item.title or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{ item.date_received or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Priority:</span>
+                <span class="info-value">{{ item.priority or 'Normal' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QC Due Date:</span>
+                <span class="info-value" style="color: #d97706;">{{ item.qcr_due_date or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due Date:</span>
+                <span class="info-value">{{ item.due_date or 'N/A' }}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Folder:</span>
+                <span class="info-value">{{ item.folder_link or 'N/A' }}</span>
+            </div>
+        </div>
+        
+        <!-- Bluebeam Notice -->
+        <div class="bluebeam-notice">
+            <h3>📐 Markups Location</h3>
+            <p>All reviewer markups are in the corresponding Bluebeam Studio session for this item.</p>
+        </div>
+        
+        <!-- All Reviewer Responses -->
+        <h3 style="margin: 20px 0 10px 0;">📝 Reviewer Responses ({{ reviewer_responses|length }})</h3>
+        {% for reviewer in reviewer_responses %}
+        <div class="reviewer-response-box">
+            <h4>
+                <span class="reviewer-badge">{{ loop.index }}</span>
+                {{ reviewer.reviewer_name }}
+                <span class="category-chip">{{ reviewer.response_category or 'Pending' }}</span>
+            </h4>
+            {% if reviewer.internal_notes %}
+            <div class="internal-notes-box">
+                <h5>🔒 Internal Notes (Team Only):</h5>
+                <div class="internal-notes-content">{{ reviewer.internal_notes }}</div>
+            </div>
+            {% else %}
+            <p style="color: #666; font-size: 13px;">No internal notes provided.</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+        
+        <form method="POST" id="qcr-form">
+            <input type="hidden" name="token" value="{{ token }}">
+            
+            <!-- QC Action Selection -->
+            <div class="action-group">
+                <h3>🎯 Your QC Decision</h3>
+                <div class="radio-group">
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Complete" required>
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">✅ Complete Response</div>
+                            <div class="radio-option-desc">Write the final response to be sent to the contractor. You'll select a category and provide the official response text.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Send Back" required>
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">↩️ Send Back to All Reviewers</div>
+                            <div class="radio-option-desc">Return to all reviewers for revisions. They will all receive an email with your feedback.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="send-back-warning" id="send-back-warning">
+                ⚠️ <strong>Sending Back:</strong> The item will be returned to ALL Initial Reviewers for revision. Each reviewer will receive an email with your notes explaining what changes are needed.
+            </div>
+            
+            <!-- Response fields (shown only for Complete) -->
+            <div id="complete-fields" style="display: none;">
+                <div class="form-group">
+                    <label for="response_category">Final Response Category *</label>
+                    <select name="response_category" id="response_category">
+                        <option value="">-- Select --</option>
+                        <option value="Approved">Approved</option>
+                        <option value="Approved as Noted">Approved as Noted</option>
+                        <option value="For Record Only">For Record Only</option>
+                        <option value="Rejected">Rejected</option>
+                        <option value="Revise and Resubmit">Revise and Resubmit</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="response_text">Final Response Description *</label>
+                    <textarea name="response_text" id="response_text" placeholder="Write the official response text to be sent to the contractor..." style="min-height: 150px;"></textarea>
+                </div>
+            </div>
+            
+            <!-- Send back notes (shown only for Send Back) -->
+            <div id="sendback-fields" style="display: none;">
+                <div class="form-group">
+                    <label for="sendback_notes">Feedback for Reviewers * <span style="font-weight: normal; color: #888;">(will be sent to all reviewers)</span></label>
+                    <textarea name="sendback_notes" id="sendback_notes" placeholder="Explain what revisions are needed from the reviewers..." style="min-height: 120px;"></textarea>
+                </div>
+            </div>
+            
+            <!-- QC Internal Notes (always shown) -->
+            <div class="form-group">
+                <label for="qcr_internal_notes">QC Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="qcr_internal_notes" id="qcr_internal_notes" placeholder="Add any internal notes for project records..."></textarea>
+            </div>
+            
+            <button type="submit" class="btn" id="submit-btn">Complete QC Review</button>
+        </form>
+    </div>
+    
+    <script>
+        const completeFields = document.getElementById('complete-fields');
+        const sendbackFields = document.getElementById('sendback-fields');
+        const sendBackWarning = document.getElementById('send-back-warning');
+        const submitBtn = document.getElementById('submit-btn');
+        const categorySelect = document.getElementById('response_category');
+        const responseText = document.getElementById('response_text');
+        const sendbackNotes = document.getElementById('sendback_notes');
+        
+        // Handle QC Action change
+        document.querySelectorAll('input[name="qc_action"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                const action = this.value;
+                
+                if (action === 'Send Back') {
+                    completeFields.style.display = 'none';
+                    sendbackFields.style.display = 'block';
+                    sendBackWarning.style.display = 'block';
+                    categorySelect.required = false;
+                    responseText.required = false;
+                    sendbackNotes.required = true;
+                    submitBtn.textContent = '↩️ Send Back to All Reviewers';
+                    submitBtn.style.background = '#f59e0b';
+                } else {
+                    completeFields.style.display = 'block';
+                    sendbackFields.style.display = 'none';
+                    sendBackWarning.style.display = 'none';
+                    categorySelect.required = true;
+                    responseText.required = true;
+                    sendbackNotes.required = false;
+                    submitBtn.textContent = '✅ Submit Final Response';
+                    submitBtn.style.background = '#10b981';
+                }
+            });
+        });
+        
+        // Form validation
+        document.getElementById('qcr-form').addEventListener('submit', function(e) {
+            const action = document.querySelector('input[name="qc_action"]:checked')?.value;
+            
+            if (!action) {
+                e.preventDefault();
+                alert('Please select a QC decision.');
+                return false;
+            }
+            
+            if (action === 'Send Back' && !sendbackNotes.value.trim()) {
+                e.preventDefault();
+                alert('Please provide feedback explaining what revisions are needed.');
+                return false;
+            }
+            
+            if (action === 'Complete') {
+                if (!categorySelect.value) {
+                    e.preventDefault();
+                    alert('Please select a final response category.');
+                    return false;
+                }
+                if (!responseText.value.trim()) {
+                    e.preventDefault();
+                    alert('Please provide the final response description.');
+                    return false;
+                }
             }
         });
     </script>
@@ -1227,12 +1878,14 @@ def init_db():
         ('reviewer_response_status', "TEXT DEFAULT 'Not Sent'"),
         ('qcr_response_status', "TEXT DEFAULT 'Not Sent'"),
         # Reviewer response fields
-        ('reviewer_notes', 'TEXT'),
+        ('reviewer_notes', 'TEXT'),  # Description (external)
+        ('reviewer_internal_notes', 'TEXT'),  # Internal notes (not shared externally)
         ('reviewer_response_category', 'TEXT'),
         ('reviewer_selected_files', 'TEXT'),
         ('reviewer_response_text', 'TEXT'),
         # QCR response fields
-        ('qcr_notes', 'TEXT'),
+        ('qcr_notes', 'TEXT'),  # Description (external)
+        ('qcr_internal_notes', 'TEXT'),  # Internal notes (not shared externally)
         ('qcr_response_category', 'TEXT'),
         ('qcr_selected_files', 'TEXT'),
         ('qcr_action', 'TEXT'),  # Approve, Modify, Send Back
@@ -1285,6 +1938,42 @@ def init_db():
         pass
     try:
         cursor.execute('ALTER TABLE reviewer_response_history ADD COLUMN selected_files TEXT')
+    except:
+        pass
+    
+    # ==========================================================================
+    # MULTI-REVIEWER SUPPORT - item_reviewers table
+    # ==========================================================================
+    # This table tracks multiple reviewers assigned to a single item
+    # Each reviewer gets their own form and must submit before QCR is notified
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS item_reviewers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            user_id INTEGER,
+            reviewer_name TEXT NOT NULL,
+            reviewer_email TEXT NOT NULL,
+            email_token TEXT,
+            email_sent_at TIMESTAMP,
+            response_at TIMESTAMP,
+            response_category TEXT,
+            internal_notes TEXT,
+            response_version INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES user(id)
+        )
+    ''')
+    
+    # Add multi_reviewer_mode column to item table
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN multi_reviewer_mode INTEGER DEFAULT 0')
+    except:
+        pass
+    
+    # Add needs_response column to item_reviewers table (for selective send-back)
+    try:
+        cursor.execute('ALTER TABLE item_reviewers ADD COLUMN needs_response INTEGER DEFAULT 1')
     except:
         pass
     
@@ -1490,7 +2179,9 @@ def parse_due_date(body):
             # Try to parse the date
             if HAS_DATEUTIL:
                 try:
-                    parsed_date = date_parser.parse(date_str, fuzzy=True)
+                    # Parse without timezone awareness to avoid UTC conversion issues
+                    parsed_date = date_parser.parse(date_str, fuzzy=True, ignoretz=True)
+                    # Return just the date portion (no time conversion)
                     return parsed_date.strftime('%Y-%m-%d')
                 except:
                     pass
@@ -1768,6 +2459,8 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
     html = html.replace('{{REVIEWER_RESPONSE_CATEGORY}}', item['reviewer_response_category'] or 'Not specified')
     html = html.replace('{{REVIEWER_NOTES}}', js_escape(item['reviewer_notes'] or item['reviewer_response_text'] or 'No notes provided'))
+    html = html.replace('{{REVIEWER_INTERNAL_NOTES}}', js_escape(item['reviewer_internal_notes'] or ''))
+    html = html.replace('{{REVIEWER_INTERNAL_NOTES_DISPLAY}}', 'block' if item['reviewer_internal_notes'] else 'none')
     html = html.replace('{{REVIEWER_SELECTED_FILES}}', reviewer_files_html)
     html = html.replace('{{REVIEWER_SELECTED_FILES_TEXT}}', reviewer_files_text)
     html = html.replace('{{REVIEWER_SELECTED_FILES_JS}}', reviewer_files_js)
@@ -1843,6 +2536,7 @@ def process_reviewer_response_json(json_path):
             UPDATE item SET
                 reviewer_response_category = ?,
                 reviewer_notes = ?,
+                reviewer_internal_notes = ?,
                 reviewer_selected_files = ?,
                 reviewer_response_at = ?,
                 reviewer_response_status = 'Responded',
@@ -1851,6 +2545,7 @@ def process_reviewer_response_json(json_path):
         ''', (
             data.get('response_category'),
             data.get('notes'),
+            data.get('internal_notes'),
             selected_files_json,
             data.get('_submitted_at', datetime.now().isoformat()),
             current_version,
@@ -1917,25 +2612,31 @@ def process_qcr_response_json(json_path):
                 UPDATE item SET
                     qcr_action = 'Send Back',
                     qcr_notes = ?,
+                    qcr_internal_notes = ?,
                     qcr_response_at = ?,
                     qcr_response_status = 'Waiting for Revision',
                     reviewer_response_status = 'Revision Requested'
                 WHERE id = ?
             ''', (
                 data.get('qcr_notes'),
+                data.get('qcr_internal_notes'),
                 data.get('_submitted_at', datetime.now().isoformat()),
                 item_id
             ))
         else:
             # Approve or Modify
             selected_files_json = json.dumps(data.get('selected_files', []))
+            final_response_text = data.get('response_text', '')  # HTA sends 'response_text'
             cursor.execute('''
                 UPDATE item SET
                     qcr_action = ?,
                     qcr_notes = ?,
+                    qcr_internal_notes = ?,
                     qcr_response_at = ?,
                     qcr_response_status = 'Responded',
                     qcr_response_mode = ?,
+                    qcr_response_text = ?,
+                    qcr_response_category = ?,
                     final_response_category = ?,
                     final_response_text = ?,
                     final_response_files = ?,
@@ -1944,10 +2645,13 @@ def process_qcr_response_json(json_path):
             ''', (
                 qc_action,
                 data.get('qcr_notes'),
+                data.get('qcr_internal_notes'),
                 data.get('_submitted_at', datetime.now().isoformat()),
                 data.get('response_mode'),
+                final_response_text,
                 data.get('response_category'),
-                data.get('final_response_text'),
+                data.get('response_category'),
+                final_response_text,
                 selected_files_json,
                 item_id
             ))
@@ -1959,19 +2663,448 @@ def process_qcr_response_json(json_path):
         processed_path = json_path.parent / f"_qcr_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         json_path.rename(processed_path)
         
-        # If QCR sent back to reviewer, send a new reviewer email with revision request
-        if qc_action == 'Send Back':
-            try:
-                qcr_notes = data.get('qcr_notes', '')
-                reviewer_result = send_reviewer_assignment_email(item_id, is_revision=True, qcr_notes=qcr_notes)
-                if reviewer_result['success']:
-                    print(f"  [Watcher] Revision request email sent to reviewer for item {item_id}")
-                else:
-                    print(f"  [Watcher] Failed to send revision email: {reviewer_result.get('error')}")
-            except Exception as e:
-                print(f"  [Watcher] Error sending revision email: {e}")
+        # Get item details for notifications
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT i.*, 
+                   ir.display_name as reviewer_name, ir.email as reviewer_email,
+                   qcr.display_name as qcr_name, qcr.email as qcr_email
+            FROM item i
+            LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+            LEFT JOIN user qcr ON i.qcr_id = qcr.id
+            WHERE i.id = ?
+        ''', (item_id,))
+        item_info = cursor.fetchone()
+        conn.close()
+        
+        if item_info:
+            qcr_notes = data.get('qcr_notes', '')
+            final_category = data.get('response_category')
+            final_text = data.get('response_text', '')  # HTA sends 'response_text'
+            
+            # Create system notifications based on QC action
+            if qc_action == 'Approve' or qc_action == 'Modify':
+                create_notification(
+                    'response_ready',
+                    f'✅ Response Ready: {item_info["type"]} {item_info["identifier"]}',
+                    f'QC review complete. The response for "{item_info["title"] or item_info["identifier"]}" is ready to be sent to the contractor. Final category: {final_category}',
+                    item_id=item_id,
+                    action_url=f'/api/items/{item_id}/complete',
+                    action_label='Mark Complete'
+                )
+                
+                # Send confirmation emails to both QCR and reviewer
+                try:
+                    email_result = send_qcr_completion_confirmation_email(
+                        item_id, qc_action, qcr_notes, 
+                        final_category=final_category, 
+                        final_text=final_text
+                    )
+                    if email_result.get('success'):
+                        print(f"  [Watcher] QC completion confirmation emails sent for item {item_id}")
+                    else:
+                        print(f"  [Watcher] Failed to send QC confirmation emails: {email_result.get('error')}")
+                except Exception as e:
+                    print(f"  [Watcher] Error sending QC confirmation emails: {e}")
+                
+            elif qc_action == 'Send Back':
+                create_notification(
+                    'sent_back',
+                    f'↩️ Sent Back: {item_info["type"]} {item_info["identifier"]}',
+                    f'The item "{item_info["title"] or item_info["identifier"]}" has been sent back to the reviewer for revisions.',
+                    item_id=item_id
+                )
+                
+                # Send revision request to reviewer
+                try:
+                    reviewer_result = send_reviewer_assignment_email(item_id, is_revision=True, qcr_notes=qcr_notes)
+                    if reviewer_result['success']:
+                        print(f"  [Watcher] Revision request email sent to reviewer for item {item_id}")
+                    else:
+                        print(f"  [Watcher] Failed to send revision email: {reviewer_result.get('error')}")
+                except Exception as e:
+                    print(f"  [Watcher] Error sending revision email: {e}")
         
         return {'success': True, 'item_id': item_id, 'action': qc_action}
+        
+    except json.JSONDecodeError:
+        return {'success': False, 'error': 'Invalid JSON file'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def process_multi_reviewer_response_json(json_path):
+    """Process a multi-reviewer response JSON file from local HTA form."""
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Verify this is a multi-reviewer response
+        if data.get('_form_type') != 'multi_reviewer_response':
+            return {'success': False, 'error': 'Not a multi-reviewer response file'}
+        
+        item_id = data.get('item_id')
+        token = data.get('token')
+        response_category = data.get('response_category')
+        internal_notes = data.get('internal_notes', '')
+        reviewer_name = data.get('reviewer_name', '')
+        
+        if not item_id or not token:
+            return {'success': False, 'error': 'Missing item_id or token'}
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Find the reviewer by token
+        cursor.execute('''
+            SELECT ir.*, i.qcr_id, i.qcr_email_sent_at
+            FROM item_reviewers ir
+            JOIN item i ON ir.item_id = i.id
+            WHERE ir.email_token = ?
+        ''', (token,))
+        reviewer = cursor.fetchone()
+        
+        if not reviewer:
+            conn.close()
+            return {'success': False, 'error': 'Invalid token - reviewer not found'}
+        
+        # Check if this is a resubmission
+        is_resubmission = reviewer['response_at'] is not None
+        qcr_email_already_sent = reviewer['qcr_email_sent_at'] is not None
+        
+        # Calculate new version
+        new_version = (reviewer['response_version'] or 0) + 1
+        
+        # Update reviewer response (allow resubmissions)
+        cursor.execute('''
+            UPDATE item_reviewers SET
+                response_at = ?,
+                response_category = ?,
+                internal_notes = ?,
+                response_version = ?,
+                needs_response = 0
+            WHERE id = ?
+        ''', (
+            data.get('_submitted_at', datetime.now().isoformat()),
+            response_category,
+            internal_notes,
+            new_version,
+            reviewer['id']
+        ))
+        
+        item_id = reviewer['item_id']
+        
+        # Check if all reviewers have now responded
+        # Note: needs_response is used for selective send-back, but for initial completion
+        # we check all reviewers regardless of needs_response
+        cursor.execute('''
+            SELECT COUNT(*) as total, SUM(CASE WHEN response_at IS NOT NULL THEN 1 ELSE 0 END) as responded
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        count_result = cursor.fetchone()
+        all_responded = (count_result['total'] > 0 and count_result['total'] == count_result['responded'])
+        
+        # Handle resubmission after QCR email was already sent
+        if is_resubmission and qcr_email_already_sent:
+            # This is an updated response after QCR was notified - send updated QCR email
+            conn.commit()
+            conn.close()
+            
+            if reviewer['qcr_id']:
+                email_result = send_email_with_retry(
+                    send_multi_reviewer_qcr_email, item_id, 'multi_reviewer_qcr'
+                )
+                if email_result.get('skipped'):
+                    print(f"  [Watcher] QCR already has latest info for item {item_id}")
+                elif email_result.get('success'):
+                    print(f"  [Watcher] Updated QCR email sent for multi-reviewer item {item_id} (reviewer {reviewer_name} resubmitted)")
+                elif email_result.get('queued'):
+                    print(f"  [Watcher] Updated QCR email queued for retry for item {item_id}")
+                else:
+                    print(f"  [Watcher] Failed to send updated QCR email: {email_result.get('error')}")
+            
+            # Rename processed file
+            try:
+                processed_path = json_path.parent / f"_multi_reviewer_response_resubmit_{datetime.now().strftime('%Y%m%d_%H%M%S%f')}.json"
+                json_path.rename(processed_path)
+            except Exception as e:
+                print(f"  [Watcher] Warning: Could not rename file {json_path.name}: {e}")
+            
+            return {
+                'success': True, 
+                'item_id': item_id, 
+                'reviewer': reviewer_name,
+                'resubmission': True,
+                'qcr_notified': True
+            }
+        
+        if all_responded:
+            # Update item status to In QC
+            cursor.execute('''
+                UPDATE item SET 
+                    status = 'In QC',
+                    reviewer_response_status = 'All Responded'
+                WHERE id = ?
+            ''', (item_id,))
+            
+            conn.commit()
+            
+            # Re-check if QCR email was already sent (in case another response was processed first)
+            cursor.execute('SELECT qcr_email_sent_at FROM item WHERE id = ?', (item_id,))
+            current_item = cursor.fetchone()
+            qcr_email_already_sent_now = current_item['qcr_email_sent_at'] is not None
+            
+            conn.close()
+            
+            # Send QCR assignment email now that all reviewers have responded
+            # Only send if QCR email hasn't already been sent (avoid duplicates)
+            if reviewer['qcr_id'] and not qcr_email_already_sent_now:
+                email_result = send_email_with_retry(
+                    send_multi_reviewer_qcr_email, item_id, 'multi_reviewer_qcr'
+                )
+                if email_result.get('success'):
+                    print(f"  [Watcher] QCR email sent for multi-reviewer item {item_id} (all reviewers responded)")
+                elif email_result.get('queued'):
+                    print(f"  [Watcher] QCR email queued for retry for item {item_id}")
+                else:
+                    print(f"  [Watcher] Failed to send QCR email: {email_result.get('error')}")
+            elif qcr_email_already_sent_now:
+                print(f"  [Watcher] QCR already notified for item {item_id}, skipping duplicate email")
+            
+            # Rename processed file (with retry for timestamp collision)
+            try:
+                processed_path = json_path.parent / f"_multi_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S%f')}.json"
+                json_path.rename(processed_path)
+            except Exception as e:
+                print(f"  [Watcher] Warning: Could not rename file {json_path.name}: {e}")
+                # Try with a unique suffix
+                try:
+                    import random
+                    processed_path = json_path.parent / f"_multi_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000,9999)}.json"
+                    json_path.rename(processed_path)
+                except:
+                    pass  # File will be reprocessed but that's OK, reviewer already marked as responded
+            
+            return {
+                'success': True, 
+                'item_id': item_id, 
+                'reviewer': reviewer_name,
+                'all_responded': True
+            }
+        else:
+            cursor.execute('''
+                UPDATE item SET status = 'In Review' WHERE id = ? AND status = 'Assigned'
+            ''', (item_id,))
+            conn.commit()
+            conn.close()
+            
+            # Rename processed file (with retry for timestamp collision)
+            try:
+                processed_path = json_path.parent / f"_multi_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S%f')}.json"
+                json_path.rename(processed_path)
+            except Exception as e:
+                print(f"  [Watcher] Warning: Could not rename file {json_path.name}: {e}")
+                try:
+                    import random
+                    processed_path = json_path.parent / f"_multi_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000,9999)}.json"
+                    json_path.rename(processed_path)
+                except:
+                    pass
+            
+            return {
+                'success': True, 
+                'item_id': item_id, 
+                'reviewer': reviewer_name,
+                'all_responded': False,
+                'responded': count_result['responded'],
+                'total': count_result['total']
+            }
+        
+    except json.JSONDecodeError:
+        return {'success': False, 'error': 'Invalid JSON file'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def process_multi_reviewer_qcr_response_json(json_path):
+    """Process a multi-reviewer QCR response JSON file from local HTA form."""
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Verify this is a multi-reviewer QCR response
+        if data.get('_form_type') != 'multi_reviewer_qcr_response':
+            return {'success': False, 'error': 'Not a multi-reviewer QCR response file'}
+        
+        item_id = data.get('item_id')
+        token = data.get('token')
+        qcr_action = data.get('qcr_action')
+        
+        if not item_id or not token:
+            return {'success': False, 'error': 'Missing item_id or token'}
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Verify token matches
+        cursor.execute('SELECT * FROM item WHERE id = ? AND email_token_qcr = ?', (item_id, token))
+        item = cursor.fetchone()
+        
+        if not item:
+            conn.close()
+            return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        if qcr_action == 'Complete':
+            # Complete the response
+            response_category = data.get('response_category')
+            response_text = data.get('response_text', '')
+            qcr_internal_notes = data.get('qcr_internal_notes', '')
+            
+            cursor.execute('''
+                UPDATE item SET
+                    qcr_action = 'Approve',
+                    qcr_notes = ?,
+                    qcr_internal_notes = ?,
+                    qcr_response_at = ?,
+                    qcr_response_status = 'Responded',
+                    qcr_response_mode = 'Revise',
+                    qcr_response_text = ?,
+                    qcr_response_category = ?,
+                    final_response_category = ?,
+                    final_response_text = ?,
+                    status = 'Ready for Response'
+                WHERE id = ?
+            ''', (
+                response_text,
+                qcr_internal_notes,
+                data.get('_submitted_at', datetime.now().isoformat()),
+                response_text,
+                response_category,
+                response_category,
+                response_text,
+                item_id
+            ))
+            conn.commit()
+            conn.close()
+            
+            # Rename processed file
+            try:
+                processed_path = json_path.parent / f"_multi_reviewer_qcr_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                json_path.rename(processed_path)
+            except Exception as e:
+                print(f"  [Watcher] Warning: Could not rename file {json_path.name}: {e}")
+            
+            # Create notification
+            create_notification(
+                'response_ready',
+                f'Response Ready: {item["type"]} {item["identifier"]}',
+                f'QC review complete. The response for "{item["title"] or item["identifier"]}" is ready to be sent.',
+                item_id=item_id
+            )
+            
+            # Send completion confirmation email to QCR and ALL reviewers
+            try:
+                email_result = send_multi_reviewer_completion_email(item_id, response_category, response_text)
+                if email_result.get('success'):
+                    print(f"  [Watcher] Completion email sent for multi-reviewer item {item_id}")
+                else:
+                    print(f"  [Watcher] Failed to send completion email: {email_result.get('error')}")
+            except Exception as e:
+                print(f"  [Watcher] Error sending completion email: {e}")
+            
+            return {'success': True, 'item_id': item_id, 'action': 'Complete'}
+            
+        elif qcr_action == 'Send Back':
+            # Send back to selected reviewers (or all if none specified)
+            sendback_notes = data.get('sendback_notes', '')
+            qcr_internal_notes = data.get('qcr_internal_notes', '')
+            sendback_reviewer_ids = data.get('sendback_reviewer_ids', [])  # List of selected reviewer IDs
+            
+            cursor.execute('''
+                UPDATE item SET
+                    qcr_action = 'Send Back',
+                    qcr_notes = ?,
+                    qcr_internal_notes = ?,
+                    qcr_response_at = ?,
+                    qcr_response_status = 'Revision Requested',
+                    status = 'In Review'
+                WHERE id = ?
+            ''', (
+                sendback_notes,
+                qcr_internal_notes,
+                data.get('_submitted_at', datetime.now().isoformat()),
+                item_id
+            ))
+            
+            # If specific reviewers selected, only reset and require those
+            if sendback_reviewer_ids and len(sendback_reviewer_ids) > 0:
+                # First, set all reviewers to NOT need response
+                cursor.execute('''
+                    UPDATE item_reviewers SET needs_response = 0 WHERE item_id = ?
+                ''', (item_id,))
+                
+                # Reset only selected reviewer responses and mark them as needing response
+                for reviewer_id in sendback_reviewer_ids:
+                    cursor.execute('''
+                        UPDATE item_reviewers SET
+                            response_at = NULL,
+                            response_category = NULL,
+                            internal_notes = NULL,
+                            response_version = response_version + 1,
+                            needs_response = 1
+                        WHERE item_id = ? AND id = ?
+                    ''', (item_id, reviewer_id))
+            else:
+                # Reset all reviewer responses (original behavior)
+                cursor.execute('''
+                    UPDATE item_reviewers SET
+                        response_at = NULL,
+                        response_category = NULL,
+                        internal_notes = NULL,
+                        response_version = response_version + 1,
+                        needs_response = 1
+                    WHERE item_id = ?
+                ''', (item_id,))
+            
+            # Reset QCR notification tracking since we're sending back
+            cursor.execute('''
+                UPDATE item SET qcr_notified_at = NULL WHERE id = ?
+            ''', (item_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            # Rename processed file
+            try:
+                processed_path = json_path.parent / f"_multi_reviewer_qcr_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                json_path.rename(processed_path)
+            except Exception as e:
+                print(f"  [Watcher] Warning: Could not rename file {json_path.name}: {e}")
+            
+            # Send sendback emails to selected reviewers (or all if none specified)
+            # Use retry logic since Outlook COM can fail intermittently
+            reviewer_ids_to_send = sendback_reviewer_ids if sendback_reviewer_ids else None
+            email_result = send_email_with_retry(
+                lambda item_id, **kw: send_multi_reviewer_sendback_emails(item_id, kw.get('feedback', ''), kw.get('reviewer_ids')),
+                item_id,
+                'multi_reviewer_sendback',
+                feedback=sendback_notes,
+                reviewer_ids=reviewer_ids_to_send
+            )
+            if email_result.get('success'):
+                sent_count = email_result.get('sent_count', 'unknown')
+                print(f"  [Watcher] Sendback emails sent to {sent_count} reviewers for item {item_id}")
+            elif email_result.get('queued'):
+                print(f"  [Watcher] Sendback emails queued for retry for item {item_id}")
+            else:
+                print(f"  [Watcher] Failed to send sendback emails: {email_result.get('error')}")
+            
+            return {'success': True, 'item_id': item_id, 'action': 'Send Back', 'reviewers_sent_back': len(sendback_reviewer_ids) if sendback_reviewer_ids else 'all'}
+        else:
+            conn.close()
+            return {'success': False, 'error': f'Unknown QCR action: {qcr_action}'}
         
     except json.JSONDecodeError:
         return {'success': False, 'error': 'Invalid JSON file'}
@@ -1985,6 +3118,7 @@ def scan_folders_for_responses():
     results = {
         'reviewer_responses': [],
         'qcr_responses': [],
+        'multi_reviewer_responses': [],
         'errors': []
     }
     
@@ -2014,6 +3148,41 @@ def scan_folders_for_responses():
                 'path': str(json_file),
                 'item_id': result.get('item_id'),
                 'action': result.get('action')
+            })
+        else:
+            results['errors'].append({
+                'path': str(json_file),
+                'error': result.get('error')
+            })
+    
+    # Scan for _multi_reviewer_response_*.json files
+    for json_file in base_path.rglob('_multi_reviewer_response_*.json'):
+        # Skip already processed files (both _processed_ and _resubmit_ variants)
+        if '_processed_' in json_file.name or '_already_processed_' in json_file.name or '_resubmit_' in json_file.name:
+            continue
+        result = process_multi_reviewer_response_json(json_file)
+        if result['success']:
+            results['multi_reviewer_responses'].append({
+                'path': str(json_file),
+                'item_id': result.get('item_id'),
+                'reviewer': result.get('reviewer'),
+                'all_responded': result.get('all_responded')
+            })
+        else:
+            results['errors'].append({
+                'path': str(json_file),
+                'error': result.get('error')
+            })
+    
+    # Scan for _multi_reviewer_qcr_response.json files
+    for json_file in base_path.rglob('_multi_reviewer_qcr_response.json'):
+        result = process_multi_reviewer_qcr_response_json(json_file)
+        if result['success']:
+            results['qcr_responses'].append({
+                'path': str(json_file),
+                'item_id': result.get('item_id'),
+                'action': result.get('action'),
+                'multi_reviewer': True
             })
         else:
             results['errors'].append({
@@ -2061,8 +3230,16 @@ class FolderResponseWatcher:
                     print(f"  [Watcher] Imported reviewer response for item {resp['item_id']} (v{resp['version']})")
                 for resp in results['qcr_responses']:
                     print(f"  [Watcher] Imported QCR response for item {resp['item_id']} ({resp['action']})")
+                for resp in results.get('multi_reviewer_responses', []):
+                    if resp.get('all_responded'):
+                        print(f"  [Watcher] Imported multi-reviewer response for item {resp['item_id']} from {resp['reviewer']} - ALL RESPONDED, QCR notified")
+                    else:
+                        print(f"  [Watcher] Imported multi-reviewer response for item {resp['item_id']} from {resp['reviewer']} - waiting for others")
                 for err in results['errors']:
                     print(f"  [Watcher] Error processing {err['path']}: {err['error']}")
+                
+                # Process any pending emails that failed earlier
+                process_pending_emails()
                     
             except Exception as e:
                 print(f"  [Watcher] Scan error: {e}")
@@ -2530,7 +3707,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
             <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
         </tr>
 
@@ -2542,6 +3719,16 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['reviewer_name'] or 'Not assigned'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
     </table>
 
@@ -2667,7 +3854,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
             <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
         </tr>
 
@@ -2679,6 +3866,16 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['reviewer_name'] or 'Not assigned'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
     </table>
 
@@ -2866,8 +4063,13 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         except:
             reviewer_files_display = item['reviewer_selected_files']
     
-    # Format reviewer notes
-    reviewer_notes_html = (item['reviewer_notes'] or 'No notes provided').replace('\n', '<br>')
+    # Format reviewer description (external notes)
+    reviewer_notes_html = (item['reviewer_notes'] or 'No description provided').replace('\n', '<br>')
+    
+    # Format reviewer internal notes (for team visibility only)
+    reviewer_internal_notes_html = ''
+    if item['reviewer_internal_notes']:
+        reviewer_internal_notes_html = item['reviewer_internal_notes'].replace('\n', '<br>')
     
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
@@ -2977,7 +4179,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
             <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
         </tr>
 
@@ -3006,7 +4213,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Notes</td>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Description</td>
             <td style="border:1px solid #ddd;">{reviewer_notes_html}</td>
         </tr>
 
@@ -3015,6 +4222,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             <td style="border:1px solid #ddd;">{reviewer_response_time}</td>
         </tr>
     </table>
+
+    {f'''<!-- INTERNAL NOTES SECTION (Team Only) -->
+    <div style="margin-top:16px; padding:12px; background:#fff8e6; border:1px solid #ffd966; border-radius:6px;">
+        <div style="font-weight:bold; color:#b7791f; margin-bottom:6px;">🔒 Reviewer's Internal Notes (Team Only)</div>
+        <div style="color:#744210; font-size:13px;">{reviewer_internal_notes_html}</div>
+    </div>''' if reviewer_internal_notes_html else ''}
 
     {version_history_html}
 
@@ -3124,7 +4337,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'N/A'}</td>
+        </tr>
+
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
             <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
         </tr>
 
@@ -3153,7 +4371,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Notes</td>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Description</td>
             <td style="border:1px solid #ddd;">{reviewer_notes_html}</td>
         </tr>
 
@@ -3162,6 +4380,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             <td style="border:1px solid #ddd;">{reviewer_response_time}</td>
         </tr>
     </table>
+
+    {f'''<!-- INTERNAL NOTES SECTION (Team Only) -->
+    <div style="margin-top:16px; padding:12px; background:#fff8e6; border:1px solid #ffd966; border-radius:6px;">
+        <div style="font-weight:bold; color:#b7791f; margin-bottom:6px;">🔒 Reviewer's Internal Notes (Team Only)</div>
+        <div style="color:#744210; font-size:13px;">{reviewer_internal_notes_html}</div>
+    </div>''' if reviewer_internal_notes_html else ''}
 
     {version_history_html}
 
@@ -3326,6 +4550,11 @@ def send_qcr_version_update_email(item_id, version):
     # Format reviewer notes
     reviewer_notes_html = (item['reviewer_notes'] or 'No notes provided').replace('\n', '<br>')
     
+    # Format reviewer internal notes (for team visibility only)
+    reviewer_internal_notes_html = ''
+    if item['reviewer_internal_notes']:
+        reviewer_internal_notes_html = item['reviewer_internal_notes'].replace('\n', '<br>')
+    
     # Format files
     reviewer_files_display = 'None selected'
     if item['reviewer_selected_files']:
@@ -3368,10 +4597,16 @@ def send_qcr_version_update_email(item_id, version):
         </tr>
 
         <tr>
-            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Notes</td>
+            <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Description</td>
             <td style="border:1px solid #ddd;">{reviewer_notes_html}</td>
         </tr>
     </table>
+
+    {f'''<!-- INTERNAL NOTES SECTION (Team Only) -->
+    <div style="margin-top:16px; padding:12px; background:#fff8e6; border:1px solid #ffd966; border-radius:6px;">
+        <div style="font-weight:bold; color:#b7791f; margin-bottom:6px;">🔒 Reviewer's Internal Notes (Team Only)</div>
+        <div style="color:#744210; font-size:13px;">{reviewer_internal_notes_html}</div>
+    </div>''' if reviewer_internal_notes_html else ''}
 
     {version_history_html}
 
@@ -3462,6 +4697,11 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
     # Format QCR notes
     qcr_notes_html = (qcr_notes or 'No notes provided').replace('\n', '<br>')
     
+    # Format QCR internal notes (for team visibility only)
+    qcr_internal_notes_html = ''
+    if item['qcr_internal_notes']:
+        qcr_internal_notes_html = item['qcr_internal_notes'].replace('\n', '<br>')
+    
     # Build the response comparison section for Modify action
     response_comparison = ''
     if qc_action == 'Modify' and final_text:
@@ -3532,6 +4772,12 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
 </div>
 </div>
 
+{f'''<!-- QCR INTERNAL NOTES SECTION (Team Only) -->
+<div style="margin: 20px 0; padding:12px; background:#fff8e6; border:1px solid #ffd966; border-radius:6px;">
+    <div style="font-weight:bold; color:#b7791f; margin-bottom:6px;">🔒 QCR's Internal Notes (Team Only)</div>
+    <div style="color:#744210; font-size:13px;">{qcr_internal_notes_html}</div>
+</div>''' if qcr_internal_notes_html else ''}
+
 {response_comparison}
 {revision_link}
 
@@ -3556,6 +4802,1501 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
         
     except Exception as e:
         return {'success': False, 'error': str(e)}
+
+
+def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_category=None, final_text=None):
+    """Send confirmation email to both QCR and reviewer after QCR completes review."""
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item with reviewer and QCR info
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    conn.close()
+    
+    if not item:
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Get version info
+    version = item['reviewer_response_version'] if item['reviewer_response_version'] is not None else 1
+    
+    # Build comparison section
+    original_category = item['reviewer_response_category'] or 'Not specified'
+    original_text = item['reviewer_response_text'] or item['reviewer_notes'] or 'No notes provided'
+    final_category_display = final_category or item['final_response_category'] or original_category
+    final_text_display = final_text or item['final_response_text'] or original_text
+    
+    # Parse selected files
+    original_files = 'None selected'
+    if item['reviewer_selected_files']:
+        try:
+            files = json.loads(item['reviewer_selected_files'])
+            if files:
+                original_files = '; '.join(files)
+        except:
+            original_files = item['reviewer_selected_files']
+    
+    final_files = original_files
+    if item['final_response_files']:
+        try:
+            files = json.loads(item['final_response_files'])
+            if files:
+                final_files = '; '.join(files)
+        except:
+            final_files = item['final_response_files']
+    
+    # Determine if there were changes
+    category_changed = original_category != final_category_display
+    text_changed = original_text.strip() != final_text_display.strip()
+    files_changed = original_files != final_files
+    has_changes = category_changed or text_changed or files_changed
+    
+    # Build the changes summary
+    changes_list = []
+    if category_changed:
+        changes_list.append(f'Category: "{original_category}" → "{final_category_display}"')
+    if text_changed:
+        changes_list.append('Response text was modified')
+    if files_changed:
+        changes_list.append('Selected files were updated')
+    
+    changes_summary = '<br>'.join(changes_list) if changes_list else 'No changes were made'
+    
+    # Determine action display
+    if qc_action == 'Approve':
+        action_display = '✅ Approved'
+        action_color = '#059669'
+        action_description = 'The initial reviewer\'s response was accepted without changes.'
+    else:  # Modify
+        action_display = '✏️ Modified'
+        action_color = '#2563eb'
+        action_description = 'The QC reviewer made modifications to the response.'
+    
+    # Format QCR notes
+    qcr_notes_html = (qcr_notes or 'No notes provided').replace('\n', '<br>')
+    
+    # Format QCR internal notes (for team visibility)
+    qcr_internal_notes_html = ''
+    if item['qcr_internal_notes']:
+        qcr_internal_notes_html = item['qcr_internal_notes'].replace('\n', '<br>')
+    
+    # Build comparison HTML
+    comparison_html = f"""
+    <div style="margin: 20px 0;">
+        <h4 style="margin: 0 0 15px 0; border-bottom: 1px solid #e5e7eb; padding-bottom: 8px;">📊 Response Comparison</h4>
+        
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;">
+            <tr style="background: #f8fafc;">
+                <th style="text-align: left; padding: 10px; border: 1px solid #e5e7eb; width: 140px;"></th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #e5e7eb;">Original (Reviewer v{version})</th>
+                <th style="text-align: left; padding: 10px; border: 1px solid #e5e7eb;">Final (QC {qc_action})</th>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold;">Category</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #fef2f2;' if category_changed else ''}">{original_category}</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #f0fdf4;' if category_changed else ''}">{final_category_display}</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold; vertical-align: top;">Response Text</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; vertical-align: top; {'background: #fef2f2;' if text_changed else ''}">{original_text.replace(chr(10), '<br>')}</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; vertical-align: top; {'background: #f0fdf4;' if text_changed else ''}">{final_text_display.replace(chr(10), '<br>')}</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold; vertical-align: top;">Selected Files</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; vertical-align: top; font-size: 12px; {'background: #fef2f2;' if files_changed else ''}">{original_files}</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; vertical-align: top; font-size: 12px; {'background: #f0fdf4;' if files_changed else ''}">{final_files}</td>
+            </tr>
+        </table>
+        
+        <div style="background: {'#fef3c7' if has_changes else '#f0fdf4'}; border: 1px solid {'#fbbf24' if has_changes else '#86efac'}; border-radius: 6px; padding: 12px;">
+            <strong>{'⚠️ Changes Made:' if has_changes else '✅ No Changes:'}</strong><br>
+            {changes_summary}
+        </div>
+    </div>
+    """
+    
+    subject = f"[LEB] {item['type']} {item['identifier']} – QC Review Complete ({qc_action})"
+    
+    html_body = f"""<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">
+<p style="font-size: 16px; font-weight: 600; color: #166534; margin-bottom: 15px;">✅ Final Response Recorded – {item['type']} {item['identifier']}</p>
+
+<p>The QC review for the item below has been completed and the final response has been recorded. This item is now ready for closeout.</p>
+
+<table style="border-collapse: collapse; margin: 15px 0;">
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Type:</td><td>{item['type']}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Identifier:</td><td>{item['identifier']}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Contractor Due Date:</td><td>{item['due_date'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Initial Reviewer:</td><td>{item['reviewer_name'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">QC Reviewer:</td><td>{item['qcr_name'] or 'N/A'}</td></tr>
+</table>
+
+<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 15px; margin: 20px 0;">
+<h3 style="margin: 0 0 10px 0; color: {action_color};">{action_display}</h3>
+<p>{action_description}</p>
+<p><strong>Final Category:</strong> {final_category_display}</p>
+</div>
+
+{comparison_html}
+
+<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin: 20px 0;">
+<p style="margin: 0 0 8px 0;"><strong>QC Reviewer Notes:</strong></p>
+<div style="background: white; border-radius: 4px; padding: 10px;">
+{qcr_notes_html}
+</div>
+</div>
+
+{f'''<!-- QCR INTERNAL NOTES (Team Only) -->
+<div style="margin: 20px 0; padding:12px; background:#fff8e6; border:1px solid #ffd966; border-radius:6px;">
+    <div style="font-weight:bold; color:#b7791f; margin-bottom:6px;">🔒 QCR's Internal Notes (Team Only)</div>
+    <div style="color:#744210; font-size:13px;">{qcr_internal_notes_html}</div>
+</div>''' if qcr_internal_notes_html else ''}
+
+<p style="color: #666; font-size: 13px;">This item is now ready for final response to the contractor.</p>
+
+<p>Thank you.</p>
+</body></html>"""
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            
+            # Send to both QCR and reviewer
+            recipients = []
+            if item['qcr_email']:
+                recipients.append(item['qcr_email'])
+            if item['reviewer_email']:
+                recipients.append(item['reviewer_email'])
+            
+            if not recipients:
+                return {'success': False, 'error': 'No recipients found'}
+            
+            mail.To = '; '.join(recipients)
+            mail.Subject = subject
+            mail.HTMLBody = html_body
+            mail.Send()
+        finally:
+            pythoncom.CoUninitialize()
+        
+        return {'success': True, 'message': 'QCR completion confirmation sent'}
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+# =============================================================================
+# MULTI-REVIEWER EMAIL FUNCTIONS
+# =============================================================================
+
+def generate_multi_reviewer_form(item_id, reviewer_record):
+    """Generate an HTA form for a specific reviewer in multi-reviewer mode.
+    
+    Args:
+        item_id: The item ID
+        reviewer_record: The reviewer record from item_reviewers table
+    
+    Returns:
+        dict with 'success', 'path' or 'error'
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT i.*, qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['folder_link']:
+        conn.close()
+        return {'success': False, 'error': 'Item has no folder assigned'}
+    
+    # Get all reviewers for this item to show status
+    cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    all_reviewers = cursor.fetchall()
+    conn.close()
+    
+    # Calculate due dates
+    reviewer_due = item['initial_reviewer_due_date'] or 'N/A'
+    qcr_due = item['qcr_due_date'] or 'N/A'
+    
+    # Build other reviewers status section
+    other_reviewers_html = ""
+    if len(all_reviewers) > 1:
+        other_reviewers_rows = ""
+        for r in all_reviewers:
+            is_current = r['reviewer_email'] == reviewer_record['reviewer_email']
+            if is_current:
+                status_badge = '<span style="background:#3b82f6; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">You</span>'
+            elif r['response_at']:
+                status_badge = f'<span style="background:#10b981; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">Responded - {r["response_category"] or "N/A"}</span>'
+            else:
+                status_badge = '<span style="background:#f59e0b; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">Pending</span>'
+            other_reviewers_rows += f'''
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px; background:{"#eff6ff" if is_current else "#f8f9fa"}; border-radius:6px; margin-bottom:6px;">
+                <span style="font-weight:{"600" if is_current else "normal"};">{r["reviewer_name"]}</span>
+                {status_badge}
+            </div>'''
+        
+        other_reviewers_html = f'''
+        <div style="background:#f0f9ff; border:1px solid #bae6fd; border-radius:8px; padding:16px; margin-bottom:24px;">
+            <div style="font-size:14px; font-weight:600; color:#0369a1; margin-bottom:12px;">Other Reviewers ({len(all_reviewers)} total)</div>
+            {other_reviewers_rows}
+        </div>'''
+    
+    # Load multi-reviewer specific template (no file selection, Bluebeam focused)
+    template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_RESPONSE_TEMPLATE.hta"
+    if not template_path.exists():
+        # Fallback to regular template if multi-reviewer specific doesn't exist
+        template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
+        if not template_path.exists():
+            template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
+            if not template_path.exists():
+                return {'success': False, 'error': 'Multi-reviewer form template not found'}
+    
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
+    
+    # Escape special characters for JavaScript embedding
+    def js_escape(s):
+        if not s:
+            return ''
+        return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
+    
+    # Replace placeholders - use reviewer info from item_reviewers record
+    html = template.replace('{{ITEM_ID}}', str(item['id']))
+    html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
+    html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
+    html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{REVIEWER_DUE_DATE}}', reviewer_due)
+    html = html.replace('{{QCR_DUE_DATE}}', qcr_due)
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{REVIEWER_NAME}}', js_escape(reviewer_record['reviewer_name']) or 'N/A')
+    html = html.replace('{{REVIEWER_EMAIL}}', reviewer_record['reviewer_email'] or '')
+    html = html.replace('{{TOKEN}}', reviewer_record['email_token'] or '')
+    html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{OTHER_REVIEWERS_SECTION}}', other_reviewers_html)
+    
+    # Save to Responses subfolder with reviewer-specific name
+    folder_path = Path(item['folder_link'])
+    responses_folder = folder_path / "Responses"
+    
+    # Create Responses subfolder if it doesn't exist
+    try:
+        responses_folder.mkdir(exist_ok=True)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to create Responses folder: {e}'}
+    
+    # Create safe filename from reviewer name
+    safe_name = "".join(c for c in reviewer_record['reviewer_name'] if c.isalnum() or c in (' ', '-', '_')).strip()
+    safe_name = safe_name.replace(' ', '_')
+    
+    form_path = responses_folder / f"_RESPONSE_FORM_{safe_name}.hta"
+    
+    try:
+        with open(form_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        return {'success': True, 'path': str(form_path)}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to save form: {e}'}
+
+
+def send_multi_reviewer_assignment_emails(item_id):
+    """Send assignment emails to all reviewers in multi-reviewer mode.
+    
+    Uses the same email template style as single-reviewer mode:
+    - Each reviewer gets their own email with the item details
+    - QCR is CC'd on each email
+    - In local mode, generates .hta forms for each reviewer
+    - Instructions reference Bluebeam session for markups
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item info with QCR
+    cursor.execute('''
+        SELECT i.*, qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Get all reviewers
+    cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewers = cursor.fetchall()
+    
+    if not reviewers:
+        conn.close()
+        return {'success': False, 'error': 'No reviewers assigned'}
+    
+    # Calculate due dates if needed
+    reviewer_due_date = item['initial_reviewer_due_date']
+    qcr_due_date = item['qcr_due_date']
+    
+    if item['date_received'] and item['due_date']:
+        calculated = calculate_review_due_dates(
+            item['date_received'],
+            item['due_date'],
+            item['priority']
+        )
+        if not reviewer_due_date:
+            reviewer_due_date = calculated['initial_reviewer_due_date']
+        if not qcr_due_date:
+            qcr_due_date = calculated['qcr_due_date']
+        
+        # Update database if values were missing
+        if not item['initial_reviewer_due_date'] or not item['qcr_due_date']:
+            cursor.execute('''
+                UPDATE item SET 
+                    initial_reviewer_due_date = COALESCE(initial_reviewer_due_date, ?),
+                    qcr_due_date = COALESCE(qcr_due_date, ?)
+                WHERE id = ?
+            ''', (calculated['initial_reviewer_due_date'], calculated['qcr_due_date'], item_id))
+            conn.commit()
+    
+    # Priority color
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    # Build list of all reviewer names for email display (each on new line)
+    all_reviewer_names = "<br>".join([r['reviewer_name'] for r in reviewers])
+    
+    # Determine if using file-based forms (local mode) - still need folder for form generation
+    folder_path = item['folder_link'] or 'Not set'
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    sent_count = 0
+    errors = []
+    
+    for reviewer in reviewers:
+        try:
+            # Generate token if not exists
+            token = reviewer['email_token']
+            if not token:
+                token = generate_token()
+                cursor.execute('UPDATE item_reviewers SET email_token = ? WHERE id = ?', (token, reviewer['id']))
+                conn.commit()
+                # Update reviewer record with token
+                reviewer = dict(reviewer)
+                reviewer['email_token'] = token
+            
+            subject = f"[LEB] {item['identifier']} – Assigned to You"
+            
+            if use_file_form:
+                # Generate the HTA form file for this reviewer
+                form_result = generate_multi_reviewer_form(item_id, dict(reviewer))
+                if form_result['success']:
+                    form_file_path = form_result['path']
+                    form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+                    
+                    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} - Assigned to You
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        You have been assigned a new review task. Please review the details below.
+    </p>
+
+    <!-- BLUEBEAM INSTRUCTIONS -->
+    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
+            <strong>Provide markups in the corresponding Bluebeam session.</strong><br/>
+            Do not attach files to your response. All markups should be completed in the shared Bluebeam Studio session.
+        </div>
+    </div>
+
+    <!-- DIRECT LINK TO FORM - PROMINENT BUTTON -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INSTRUCTIONS FOR HTA -->
+    <div style="margin:20px 0; padding:15px; background:#e8f5e9; border:1px solid #4caf50; border-radius:8px;">
+        <div style="font-size:14px; color:#2e7d32;">
+            <strong>Instructions:</strong>
+            <ol style="margin:8px 0 0 0; padding-left:20px;">
+                <li>Click the green button above to open the response form</li>
+                <li>If prompted, select <strong>"Microsoft (R) HTML Application host"</strong> - choose <strong>Open</strong>, do NOT save the file</li>
+                <li>Select your response category</li>
+                <li>Click <strong>Submit Response</strong> - your response will be saved automatically</li>
+            </ol>
+        </div>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
+            <td style="border:1px solid #ddd;">{all_reviewer_names}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
+        </tr>
+    </table>
+
+    <!-- QCR NOTE -->
+    <p style="margin-top:16px; font-size:13px; color:#555;">
+        <strong>{item['qcr_name'] or 'The QC Reviewer'}</strong> has been assigned and will be notified once all reviewers have submitted their responses.
+    </p>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+                else:
+                    # Form generation failed, log and skip to server-based
+                    print(f"Warning: Could not generate form file for {reviewer['reviewer_name']}: {form_result.get('error')}")
+                    use_file_form = False
+            
+            if not use_file_form:
+                # Use server-based form (fallback)
+                app_host = get_app_host()
+                review_url = f"{app_host}/respond/multi-reviewer?token={token}"
+                
+                html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} - Assigned to You
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        You have been assigned a new review task. Please review the details below.
+    </p>
+
+    <!-- BLUEBEAM INSTRUCTIONS -->
+    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
+            <strong>Provide markups in the corresponding Bluebeam session.</strong><br/>
+            Do not attach files to your response. All markups should be completed in the shared Bluebeam Studio session.
+        </div>
+    </div>
+
+    <!-- ACTION BUTTON -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{review_url}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:280px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
+            <td style="border:1px solid #ddd;">{all_reviewer_names}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
+            <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
+        </tr>
+    </table>
+
+    <!-- QCR NOTE -->
+    <p style="margin-top:16px; font-size:13px; color:#555;">
+        <strong>{item['qcr_name'] or 'The QC Reviewer'}</strong> has been assigned and will be notified once all reviewers have submitted their responses.
+    </p>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated. If you believe you received this by mistake, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+            
+            # Send via Outlook (runs for BOTH HTA and server-based forms)
+            # This code is OUTSIDE the 'if not use_file_form:' block
+            pythoncom.CoInitialize()
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+                mail = outlook.CreateItem(0)
+                mail.To = reviewer['reviewer_email']
+                # Note: QCR gets their own separate notification email instead of being CC'd
+                mail.Subject = subject
+                mail.HTMLBody = html_body
+                mail.Send()
+                
+                # Update sent timestamp
+                cursor.execute('''
+                    UPDATE item_reviewers SET email_sent_at = ? WHERE id = ?
+                ''', (datetime.now().isoformat(), reviewer['id']))
+                conn.commit()
+                
+                sent_count += 1
+            finally:
+                pythoncom.CoUninitialize()
+                
+        except Exception as e:
+            errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
+    
+    # Send separate notification email to QCR
+    qcr_email_sent = False
+    if item['qcr_email'] and sent_count > 0:
+        try:
+            reviewer_names_list = "<br>".join([f"• {r['reviewer_name']}" for r in reviewers])
+            
+            qcr_subject = f"[LEB] {item['identifier']} – Assigned to You for QC Review"
+            qcr_html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.6;">
+
+    <h2 style="color:#2563eb; margin-bottom:10px;">[LEB] {item['identifier']} – Assigned to You for QC Review</h2>
+    
+    <div style="background:#dbeafe; border:1px solid #3b82f6; border-radius:8px; padding:15px; margin:15px 0;">
+        <p style="margin:0; font-size:14px; color:#1e40af;">
+            <strong>📋 You will be notified once all reviewers have submitted their responses.</strong>
+        </p>
+    </div>
+    
+    <p>You have been assigned as the <strong>QC Reviewer</strong> for the following item. The initial reviewers listed below have been notified and are currently working on their responses.</p>
+    
+    <div style="background:#f8fafc; border-radius:8px; padding:15px; margin:15px 0; border:1px solid #e5e7eb;">
+        <h4 style="margin:0 0 10px 0; color:#374151;">👥 Assigned Reviewers ({len(reviewers)})</h4>
+        <div style="color:#4b5563;">
+            {reviewer_names_list}
+        </div>
+    </div>
+    
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+    </table>
+    
+    <p style="margin-top:20px; font-size:13px; color:#666;">
+        Once all reviewers have submitted their responses, you will receive another email with a link to complete your QC review.
+    </p>
+    
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This message was automatically generated.</em>
+    </p>
+
+</div>"""
+            
+            pythoncom.CoInitialize()
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+                mail = outlook.CreateItem(0)
+                mail.To = item['qcr_email']
+                mail.Subject = qcr_subject
+                mail.HTMLBody = qcr_html_body
+                mail.Send()
+                qcr_email_sent = True
+            finally:
+                pythoncom.CoUninitialize()
+        except Exception as e:
+            errors.append(f"QCR ({item['qcr_name']}): {str(e)}")
+    
+    # Update item status
+    if sent_count > 0:
+        cursor.execute('''
+            UPDATE item SET 
+                status = 'Assigned',
+                reviewer_response_status = 'Emails Sent'
+            WHERE id = ?
+        ''', (item_id,))
+        conn.commit()
+    
+    conn.close()
+    
+    if errors:
+        return {
+            'success': sent_count > 0,
+            'sent_count': sent_count,
+            'qcr_notified': qcr_email_sent,
+            'errors': errors,
+            'message': f'Sent {sent_count} reviewer emails with {len(errors)} errors'
+        }
+    
+    return {'success': True, 'sent_count': sent_count, 'qcr_notified': qcr_email_sent, 'message': f'Sent {sent_count} reviewer emails + QCR notification'}
+
+
+def generate_multi_reviewer_qcr_form(item_id):
+    """Generate an HTA form for the QCR in multi-reviewer mode.
+    
+    Args:
+        item_id: The item ID
+    
+    Returns:
+        dict with 'success', 'path' or 'error'
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT i.*, qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['folder_link']:
+        conn.close()
+        return {'success': False, 'error': 'Item has no folder assigned'}
+    
+    # Get all reviewer responses
+    cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewers = cursor.fetchall()
+    conn.close()
+    
+    # Load template
+    template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_QCR_TEMPLATE.hta"
+    if not template_path.exists():
+        return {'success': False, 'error': 'Multi-reviewer QCR form template not found'}
+    
+    with open(template_path, 'r', encoding='utf-8') as f:
+        template = f.read()
+    
+    # Escape special characters for JavaScript embedding
+    def js_escape(s):
+        if not s:
+            return ''
+        return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
+    
+    # Build reviewer responses HTML
+    reviewer_html = ""
+    reviewer_checkboxes_html = ""
+    reviewers_json_list = []
+    
+    for idx, r in enumerate(reviewers, 1):
+        category = r['response_category'] or 'N/A'
+        notes = r['internal_notes'] or ''
+        
+        notes_section = ""
+        if notes:
+            notes_section = f'''
+            <div class="internal-notes-box">
+                <h5>Suggested Response for QC Reviewer (Team Only):</h5>
+                <div class="internal-notes-content">{notes}</div>
+            </div>'''
+        else:
+            notes_section = '<p class="no-notes">No suggested response provided.</p>'
+        
+        reviewer_html += f'''
+        <div class="reviewer-response-box">
+            <div class="reviewer-header">
+                <span class="reviewer-badge">{idx}</span>
+                <span class="reviewer-name">{r['reviewer_name']}</span>
+                <span class="category-chip">{category}</span>
+            </div>
+            {notes_section}
+        </div>'''
+        
+        # Build checkbox for send-back selection
+        reviewer_checkboxes_html += f'''
+        <label style="display:flex; align-items:center; padding:8px; background:white; border-radius:6px; margin-bottom:6px; cursor:pointer;">
+            <input type="checkbox" name="sendback_reviewers" value="{r['id']}" checked style="width:18px; height:18px; margin-right:10px;">
+            <span style="flex:1;">{r['reviewer_name']}</span>
+            <span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:11px;">{category}</span>
+        </label>'''
+        
+        # Build JSON data for JavaScript
+        reviewers_json_list.append({
+            'id': r['id'],
+            'name': r['reviewer_name'],
+            'email': r['reviewer_email'],
+            'category': category
+        })
+    
+    # Convert reviewers list to JSON for JavaScript
+    reviewers_json = json.dumps(reviewers_json_list)
+    
+    # Replace placeholders
+    html = template.replace('{{ITEM_ID}}', str(item['id']))
+    html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
+    html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
+    html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{PRIORITY}}', item['priority'] or 'Normal')
+    html = html.replace('{{QCR_NAME}}', item['qcr_name'] or 'N/A')
+    html = html.replace('{{QCR_EMAIL}}', item['qcr_email'] or '')
+    html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']))
+    html = html.replace('{{TOKEN}}', item['email_token_qcr'] or '')
+    html = html.replace('{{REVIEWER_COUNT}}', str(len(reviewers)))
+    html = html.replace('{{REVIEWER_RESPONSES_HTML}}', reviewer_html)
+    html = html.replace('{{REVIEWER_CHECKBOXES_HTML}}', reviewer_checkboxes_html)
+    html = html.replace('{{REVIEWERS_JSON}}', reviewers_json)
+    
+    # Save to item folder
+    folder_path = Path(item['folder_link'])
+    try:
+        folder_path.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to create folder: {e}'}
+    
+    # Create Responses folder
+    responses_folder = folder_path / "Responses"
+    try:
+        responses_folder.mkdir(exist_ok=True)
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to create Responses folder: {e}'}
+    
+    # Generate filename
+    safe_name = "".join(c for c in (item['qcr_name'] or 'QCR') if c.isalnum() or c in (' ', '-', '_')).strip()
+    file_name = f"_QCR_Review_Form_{safe_name}.hta"
+    file_path = folder_path / file_name
+    
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        return {'success': True, 'path': str(file_path)}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to write form: {e}'}
+
+
+def send_multi_reviewer_qcr_email(item_id):
+    """Send QCR assignment email for multi-reviewer items."""
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # ATOMIC CHECK-AND-CLAIM: Update qcr_email_sent_at ONLY if it's NULL
+    # This prevents race conditions where multiple watcher cycles try to send
+    cursor.execute('''
+        UPDATE item SET qcr_email_sent_at = ? 
+        WHERE id = ? AND qcr_email_sent_at IS NULL
+    ''', (datetime.now().isoformat(), item_id))
+    
+    if cursor.rowcount == 0:
+        # Another process already claimed this - qcr_email_sent_at was not NULL
+        conn.close()
+        print(f"  [QCR Email] Skipping duplicate - another process already sending/sent for item {item_id}")
+        return {'success': True, 'message': 'QCR email already being sent', 'skipped': True}
+    
+    conn.commit()  # Commit the claim
+    
+    # Get item with QCR info
+    cursor.execute('''
+        SELECT i.*, qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    if not item['qcr_email']:
+        conn.close()
+        return {'success': False, 'error': 'No QCR assigned'}
+    
+    # Generate token if not exists
+    token = item['email_token_qcr']
+    if not token:
+        token = generate_token()
+        cursor.execute('UPDATE item SET email_token_qcr = ? WHERE id = ?', (token, item_id))
+        conn.commit()
+    
+    # Get reviewer responses
+    cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewers = cursor.fetchall()
+    
+    app_host = get_app_host()
+    
+    # Check if using local mode with file-based forms
+    folder_path = item['folder_link'] or 'Not set'
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    # Generate HTA form if in local mode
+    hta_form_path = None
+    if use_file_form:
+        form_result = generate_multi_reviewer_qcr_form(item_id)
+        if form_result.get('success'):
+            hta_form_path = form_result['path']
+        else:
+            print(f"  Warning: Could not generate QCR HTA form: {form_result.get('error')}")
+    
+    # Build reviewer names for display (each on new line)
+    reviewer_names_html = "<br>".join([r['reviewer_name'] for r in reviewers])
+    
+    # Build reviewer summary table
+    reviewer_summary = ""
+    for r in reviewers:
+        category = r['response_category'] or 'N/A'
+        notes_preview = r['internal_notes'][:100] + '...' if r['internal_notes'] and len(r['internal_notes']) > 100 else (r['internal_notes'] or 'None')
+        reviewer_summary += f"""
+        <tr>
+            <td style="padding:8px; border-bottom:1px solid #e5e7eb;">{r['reviewer_name']}</td>
+            <td style="padding:8px; border-bottom:1px solid #e5e7eb;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>
+            <td style="padding:8px; border-bottom:1px solid #e5e7eb; font-size:12px; color:#666;">{notes_preview}</td>
+        </tr>
+"""
+    
+    # Build action section based on mode
+    if use_file_form and hta_form_path:
+        form_file_link = f'file:///{hta_form_path.replace(chr(92), "/")}'
+        action_button_html = f"""
+    <!-- ACTION BUTTON AT TOP - HTA FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#10b981" style="background:#10b981; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#10b981; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN QC REVIEW FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INSTRUCTIONS FOR HTA -->
+    <div style="margin:20px 0; padding:15px; background:#e8f5e9; border:1px solid #4caf50; border-radius:8px;">
+        <div style="font-size:14px; color:#2e7d32;">
+            <strong>Instructions:</strong>
+            <ol style="margin:8px 0 0 0; padding-left:20px;">
+                <li>Click the green button above to open the QC review form</li>
+                <li>If prompted, select <strong>"Microsoft (R) HTML Application host"</strong> - choose <strong>Open</strong>, do NOT save the file</li>
+                <li>Review all responses and select your final action (Complete or Send Back)</li>
+                <li>Click <strong>Submit Decision</strong> - your decision will be saved automatically</li>
+            </ol>
+        </div>
+    </div>"""
+    else:
+        review_url = f"{app_host}/respond/multi-qcr?token={token}"
+        action_button_html = f"""
+    <!-- ACTION BUTTON AT TOP - SERVER FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#10b981" style="background:#10b981; border-radius:8px; padding:0;">
+                    <a href="{review_url}" target="_blank"
+                       style="background:#10b981; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        COMPLETE QC REVIEW
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>"""
+    
+    # Priority color
+    priority = item['priority'] or 'Normal'
+    priority_color = '#e67e22' if priority == 'Medium' else '#c0392b' if priority == 'High' else '#27ae60'
+    
+    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+    <h2 style="color:#444; margin-bottom:6px;">[LEB] {item['identifier']} - QC Review Ready</h2>
+    <p style="color:#666; margin-top:0;">All {len(reviewers)} reviewers have submitted their responses. Please complete the QC review.</p>
+    
+    {action_button_html}
+    
+    <!-- Bluebeam Notice -->
+    <div style="background:#dbeafe; border:1px solid #3b82f6; border-radius:8px; padding:15px; margin:15px 0;">
+        <div style="font-size:13px; color:#1e40af;">
+            <strong>Markups Location:</strong> All reviewer markups are in the <strong>Bluebeam Studio session</strong> for this item.
+        </div>
+    </div>
+    
+    <!-- Item Info -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
+            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{priority}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{item['initial_reviewer_due_date'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{item['qcr_due_date'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
+            <td style="border:1px solid #ddd;">{reviewer_names_html}</td>
+        </tr>
+    </table>
+    
+    <!-- Reviewer Responses Table -->
+    <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:15px; margin:15px 0;">
+        <div style="font-size:14px; color:#166534; font-weight:bold; margin-bottom:10px;">Reviewer Responses ({len(reviewers)})</div>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <tr style="background:#ecfdf5;">
+                <th style="padding:8px; text-align:left; border-bottom:2px solid #86efac;">Reviewer</th>
+                <th style="padding:8px; text-align:left; border-bottom:2px solid #86efac;">Category</th>
+                <th style="padding:8px; text-align:left; border-bottom:2px solid #86efac;">Suggested Response</th>
+            </tr>
+            {reviewer_summary}
+        </table>
+    </div>
+    
+    <p style="font-size:12px; color:#888;">As QC Reviewer, you will write the final response to be sent to the contractor.</p>
+    
+    <!-- CC Note -->
+    <p style="margin-top:16px; font-size:13px; color:#555;">
+        All reviewers have been CC'd on this email.
+    </p>
+</div>"""
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            mail.To = item['qcr_email']
+            
+            # CC all the reviewers
+            reviewer_emails = [r['reviewer_email'] for r in reviewers if r['reviewer_email']]
+            if reviewer_emails:
+                mail.CC = "; ".join(reviewer_emails)
+            
+            mail.Subject = f"[LEB] {item['identifier']} - QC Review Ready ({len(reviewers)} Reviewers)"
+            mail.HTMLBody = html_body
+            
+            # Note: HTA files are not attached as they get blocked by email providers (Gmail, etc.)
+            # The email body contains a link/button to access the form directly from the shared folder
+            
+            mail.Send()
+            
+            # Just update qcr_response_status (qcr_email_sent_at was already set atomically at start)
+            cursor.execute('''
+                UPDATE item SET qcr_response_status = 'Email Sent' WHERE id = ?
+            ''', (item_id,))
+            conn.commit()
+        finally:
+            pythoncom.CoUninitialize()
+        
+        conn.close()
+        return {'success': True, 'message': 'QCR email sent'}
+        
+    except Exception as e:
+        # Reset qcr_email_sent_at since we failed to send
+        try:
+            conn2 = get_db()
+            cursor2 = conn2.cursor()
+            cursor2.execute('UPDATE item SET qcr_email_sent_at = NULL WHERE id = ?', (item_id,))
+            conn2.commit()
+            conn2.close()
+            print(f"  [QCR Email] Failed to send, reset qcr_email_sent_at for item {item_id}")
+        except:
+            pass  # Best effort reset
+        conn.close()
+        return {'success': False, 'error': str(e)}
+
+def send_multi_reviewer_sendback_emails(item_id, feedback, reviewer_ids=None):
+    """Send emails to selected reviewers when QCR sends back for revision.
+    
+    Args:
+        item_id: The item ID
+        feedback: The QCR's feedback message
+        reviewer_ids: List of specific reviewer IDs to send to (None = all reviewers)
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item info with QCR email
+    cursor.execute('''
+        SELECT i.*, qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    qcr_email = item['qcr_email']  # Store QCR email for CC
+    
+    # Get selected reviewers or all reviewers
+    if reviewer_ids:
+        placeholders = ','.join(['?' for _ in reviewer_ids])
+        cursor.execute(f'SELECT * FROM item_reviewers WHERE item_id = ? AND id IN ({placeholders})', 
+                      [item_id] + list(reviewer_ids))
+    else:
+        cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewers = cursor.fetchall()
+    
+    if not reviewers:
+        conn.close()
+        return {'success': False, 'error': 'No reviewers found'}
+    
+    # Mark only selected reviewers as needing response, clear their response
+    # Other reviewers keep their current response
+    selected_ids = [r['id'] for r in reviewers]
+    for rid in selected_ids:
+        cursor.execute('''
+            UPDATE item_reviewers SET 
+                needs_response = 1,
+                response_at = NULL,
+                response_category = NULL,
+                internal_notes = NULL
+            WHERE id = ?
+        ''', (rid,))
+    
+    # Mark non-selected reviewers as NOT needing response (they keep their existing response)
+    if reviewer_ids:
+        cursor.execute('''
+            UPDATE item_reviewers SET needs_response = 0
+            WHERE item_id = ? AND id NOT IN ({})
+        '''.format(','.join(['?' for _ in selected_ids])), [item_id] + selected_ids)
+    
+    # Update item status (use 'In Review' as 'Sent Back' is not in status constraint)
+    cursor.execute('''
+        UPDATE item SET 
+            status = 'In Review',
+            reviewer_response_status = 'Revision Requested',
+            qcr_email_sent_at = NULL,
+            qcr_response_status = NULL,
+            qcr_action = 'Send Back',
+            qcr_notes = ?
+        WHERE id = ?
+    ''', (feedback, item_id))
+    
+    conn.commit()
+    
+    # Determine if using local mode
+    folder_path = item['folder_link'] or 'Not set'
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    app_host = get_app_host()
+    sent_count = 0
+    errors = []
+    
+    for reviewer in reviewers:
+        try:
+            # Generate new token for revision
+            token = generate_token()
+            cursor.execute('UPDATE item_reviewers SET email_token = ?, response_version = response_version + 1 WHERE id = ?', 
+                          (token, reviewer['id']))
+            conn.commit()
+            
+            subject = f"[LEB] {item['identifier']} – REVISION REQUESTED"
+            
+            if use_file_form:
+                # Generate HTA form for this reviewer
+                reviewer_record = dict(reviewer)
+                reviewer_record['email_token'] = token
+                form_result = generate_multi_reviewer_form(item_id, reviewer_record)
+                
+                if form_result.get('success'):
+                    form_file_path = form_result['path']
+                    form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+                    
+                    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+    <h2 style="color:#c0392b; margin-bottom:6px;">[LEB] {item['identifier']} - REVISION REQUESTED</h2>
+    <p style="color:#666; margin-top:0;">The QC Reviewer has requested revisions to your response.</p>
+    
+    <!-- ACTION BUTTON -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#f59e0b" style="background:#f59e0b; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#f59e0b; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        📝 SUBMIT REVISED RESPONSE
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+    
+    <!-- INSTRUCTIONS FOR HTA -->
+    <div style="margin:20px 0; padding:15px; background:#fef3c7; border:1px solid #f59e0b; border-radius:8px;">
+        <div style="font-size:14px; color:#92400e;">
+            <strong>Instructions:</strong>
+            <ol style="margin:8px 0 0 0; padding-left:20px;">
+                <li>Click the orange button above to open the response form</li>
+                <li>If prompted, select <strong>"Microsoft (R) HTML Application host"</strong> - choose <strong>Open</strong></li>
+                <li>Review the feedback and select your updated response category</li>
+                <li>Click <strong>Submit Response</strong></li>
+            </ol>
+        </div>
+    </div>
+    
+    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:15px; margin:15px 0;">
+        <div style="font-size:14px; color:#991b1b; font-weight:bold;">↩️ Feedback from {item['qcr_name'] or 'QC Reviewer'}</div>
+        <div style="margin-top:10px; padding:10px; background:white; border-radius:4px; color:#991b1b;">
+            {feedback}
+        </div>
+    </div>
+    
+    <div style="background:#f8f9fa; border-radius:8px; padding:15px; margin:15px 0;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <tr><td style="padding:5px 0; color:#666; width:120px;">Type:</td><td style="font-weight:600;">{item['type']}</td></tr>
+            <tr><td style="padding:5px 0; color:#666;">Identifier:</td><td style="font-weight:600;">{item['identifier']}</td></tr>
+            <tr><td style="padding:5px 0; color:#666;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
+        </table>
+    </div>
+    
+    <p style="font-size:12px; color:#888;">Please review the feedback and submit an updated response.</p>
+</div>"""
+                else:
+                    # Fallback to server form if HTA generation fails
+                    use_file_form = False
+            
+            if not use_file_form:
+                review_url = f"{app_host}/respond/multi-reviewer?token={token}"
+                
+                html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+    <h2 style="color:#c0392b; margin-bottom:6px;">[LEB] {item['identifier']} - REVISION REQUESTED</h2>
+    <p style="color:#666; margin-top:0;">The QC Reviewer has requested revisions to your response.</p>
+    
+    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:15px; margin:15px 0;">
+        <div style="font-size:14px; color:#991b1b; font-weight:bold;">↩️ Feedback from {item['qcr_name'] or 'QC Reviewer'}</div>
+        <div style="margin-top:10px; padding:10px; background:white; border-radius:4px; color:#991b1b;">
+            {feedback}
+        </div>
+    </div>
+    
+    <div style="background:#f8f9fa; border-radius:8px; padding:15px; margin:15px 0;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <tr><td style="padding:5px 0; color:#666; width:120px;">Type:</td><td style="font-weight:600;">{item['type']}</td></tr>
+            <tr><td style="padding:5px 0; color:#666;">Identifier:</td><td style="font-weight:600;">{item['identifier']}</td></tr>
+            <tr><td style="padding:5px 0; color:#666;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
+        </table>
+    </div>
+    
+    <div style="margin:20px 0;">
+        <a href="{review_url}" style="display:inline-block; padding:12px 24px; background:#f59e0b; color:white; text-decoration:none; border-radius:8px; font-weight:600;">
+            📝 Submit Revised Response
+        </a>
+    </div>
+    
+    <p style="font-size:12px; color:#888;">Please review the feedback and submit an updated response.</p>
+</div>"""
+            
+            pythoncom.CoInitialize()
+            try:
+                outlook = win32com.client.Dispatch("Outlook.Application")
+                mail = outlook.CreateItem(0)
+                mail.To = reviewer['reviewer_email']
+                # CC the QCR so they know revision request was sent
+                if qcr_email:
+                    mail.CC = qcr_email
+                mail.Subject = subject
+                mail.HTMLBody = html_body
+                mail.Send()
+                sent_count += 1
+            finally:
+                pythoncom.CoUninitialize()
+                
+        except Exception as e:
+            errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
+    
+    conn.close()
+    
+    return {
+        'success': sent_count > 0,
+        'sent_count': sent_count,
+        'total_selected': len(reviewers),
+        'errors': errors if errors else None
+    }
+
+
+def send_multi_reviewer_completion_email(item_id, final_category, final_text):
+    """Send completion confirmation email to QCR and ALL reviewers when QCR completes multi-reviewer item.
+    
+    This goes to everyone (QCR + all reviewers) regardless of who was sent back for revision.
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item with QCR info
+    cursor.execute('''
+        SELECT i.*, qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Get ALL reviewers (not just those who needed response)
+    cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewers = cursor.fetchall()
+    conn.close()
+    
+    if not reviewers:
+        return {'success': False, 'error': 'No reviewers found'}
+    
+    # Build reviewer summary HTML
+    reviewer_summary = ""
+    for idx, r in enumerate(reviewers, 1):
+        category = r['response_category'] or 'N/A'
+        reviewer_summary += f"""
+        <tr>
+            <td style="padding:8px; border:1px solid #e5e7eb;">{idx}</td>
+            <td style="padding:8px; border:1px solid #e5e7eb;">{r['reviewer_name']}</td>
+            <td style="padding:8px; border:1px solid #e5e7eb;">{category}</td>
+        </tr>"""
+    
+    subject = f"[LEB] {item['identifier']} – QC Review Complete ✅"
+    
+    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.6;">
+    <div style="background:#059669; color:white; padding:20px; border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;">✅ QC Review Complete</h2>
+        <p style="margin:8px 0 0 0; opacity:0.9;">{item['type']} {item['identifier']}</p>
+    </div>
+    
+    <div style="background:#f8fafc; padding:20px; border:1px solid #e5e7eb; border-top:none;">
+        <p>The QC review for this item has been completed and is ready for final response to the contractor.</p>
+        
+        <div style="background:white; border-radius:8px; padding:15px; margin:15px 0; border:1px solid #e5e7eb;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <tr><td style="padding:5px 0; color:#666; width:140px;">Type:</td><td style="font-weight:600;">{item['type']}</td></tr>
+                <tr><td style="padding:5px 0; color:#666;">Identifier:</td><td style="font-weight:600;">{item['identifier']}</td></tr>
+                <tr><td style="padding:5px 0; color:#666;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
+                <tr><td style="padding:5px 0; color:#666;">QC Reviewer:</td><td>{item['qcr_name'] or 'N/A'}</td></tr>
+            </table>
+        </div>
+        
+        <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:15px; margin:15px 0;">
+            <h4 style="margin:0 0 10px 0; color:#166534;">📋 Final Response</h4>
+            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <tr><td style="padding:5px 0; color:#666; width:140px;">Category:</td><td style="font-weight:600; color:#166534;">{final_category}</td></tr>
+                <tr><td style="padding:5px 0; color:#666; vertical-align:top;">Response:</td><td>{final_text.replace(chr(10), '<br>') if final_text else 'N/A'}</td></tr>
+            </table>
+        </div>
+        
+        <div style="margin:15px 0;">
+            <h4 style="margin:0 0 10px 0; color:#374151;">👥 Reviewer Responses Summary</h4>
+            <table style="width:100%; border-collapse:collapse; font-size:13px; background:white;">
+                <tr style="background:#f1f5f9;">
+                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left; width:40px;">#</th>
+                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left;">Reviewer</th>
+                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left;">Response Category</th>
+                </tr>
+                {reviewer_summary}
+            </table>
+        </div>
+        
+        <p style="font-size:12px; color:#888; margin-top:20px;">This item is now ready for final response to the contractor.</p>
+    </div>
+</div>"""
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            
+            # Send to QCR
+            mail.To = item['qcr_email'] or ''
+            
+            # CC all reviewers
+            reviewer_emails = [r['reviewer_email'] for r in reviewers if r['reviewer_email']]
+            if reviewer_emails:
+                mail.CC = "; ".join(reviewer_emails)
+            
+            mail.Subject = subject
+            mail.HTMLBody = html_body
+            mail.Send()
+        finally:
+            pythoncom.CoUninitialize()
+        
+        return {'success': True, 'message': 'Completion email sent to QCR and all reviewers'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
 
 # =============================================================================
 # AUTHENTICATION DECORATOR
@@ -3852,7 +6593,14 @@ def api_get_items():
     query = '''
         SELECT i.*, 
                u.display_name as assigned_to_name,
-               ir.display_name as initial_reviewer_name,
+               CASE 
+                   WHEN i.multi_reviewer_mode = 1 THEN (
+                       SELECT GROUP_CONCAT(reviewer_name, ', ') 
+                       FROM item_reviewers 
+                       WHERE item_id = i.id
+                   )
+                   ELSE ir.display_name 
+               END as initial_reviewer_name,
                qcr.display_name as qcr_name
         FROM item i
         LEFT JOIN user u ON i.assigned_to_user_id = u.id
@@ -3900,7 +6648,14 @@ def api_get_item(item_id):
     cursor.execute('''
         SELECT i.*, 
                u.display_name as assigned_to_name,
-               ir.display_name as initial_reviewer_name,
+               CASE 
+                   WHEN i.multi_reviewer_mode = 1 THEN (
+                       SELECT GROUP_CONCAT(reviewer_name, ', ') 
+                       FROM item_reviewers 
+                       WHERE item_id = i.id
+                   )
+                   ELSE ir.display_name 
+               END as initial_reviewer_name,
                qcr.display_name as qcr_name
         FROM item i
         LEFT JOIN user u ON i.assigned_to_user_id = u.id
@@ -4251,22 +7006,32 @@ def api_save_response(item_id):
         conn.close()
         return jsonify({'error': 'Not authorized to edit this item'}), 403
     
-    # Update response fields
+    # Update response fields (both regular and final response fields)
     updates = []
     params = []
     
     if 'response_category' in data:
         updates.append('response_category = ?')
         params.append(data['response_category'] or None)
+        # Also update final response category
+        updates.append('final_response_category = ?')
+        params.append(data['response_category'] or None)
     
     if 'response_text' in data:
         updates.append('response_text = ?')
         params.append(data['response_text'] or None)
+        # Also update final response text
+        updates.append('final_response_text = ?')
+        params.append(data['response_text'] or None)
     
     if 'response_files' in data:
         import json as json_module
+        files_json = json_module.dumps(data['response_files']) if data['response_files'] else None
         updates.append('response_files = ?')
-        params.append(json_module.dumps(data['response_files']) if data['response_files'] else None)
+        params.append(files_json)
+        # Also update final response files
+        updates.append('final_response_files = ?')
+        params.append(files_json)
     
     if updates:
         params.append(item_id)
@@ -4869,6 +7634,7 @@ def respond_reviewer_submit():
     # Get form data
     response_category = request.form.get('response_category')
     notes = request.form.get('notes', '')
+    internal_notes = request.form.get('internal_notes', '')
     selected_files = request.form.getlist('selected_files')
     
     # Calculate new version
@@ -4904,6 +7670,7 @@ def respond_reviewer_submit():
                 reviewer_response_status = 'Responded',
                 reviewer_response_category = ?,
                 reviewer_notes = ?,
+                reviewer_internal_notes = ?,
                 reviewer_selected_files = ?,
                 reviewer_response_version = ?,
                 status = 'In QC',
@@ -4911,6 +7678,7 @@ def respond_reviewer_submit():
                 qcr_response_at = NULL,
                 qcr_response_status = 'Not Sent',
                 qcr_notes = NULL,
+                qcr_internal_notes = NULL,
                 qcr_response_category = NULL,
                 qcr_response_text = NULL,
                 qcr_response_mode = NULL
@@ -4919,6 +7687,7 @@ def respond_reviewer_submit():
             datetime.now().isoformat(),
             response_category,
             notes,
+            internal_notes,
             json.dumps(selected_files),
             new_version,
             item_id
@@ -4931,6 +7700,7 @@ def respond_reviewer_submit():
                 reviewer_response_status = 'Responded',
                 reviewer_response_category = ?,
                 reviewer_notes = ?,
+                reviewer_internal_notes = ?,
                 reviewer_selected_files = ?,
                 reviewer_response_version = ?,
                 status = 'In QC'
@@ -4939,6 +7709,7 @@ def respond_reviewer_submit():
             datetime.now().isoformat(),
             response_category,
             notes,
+            internal_notes,
             json.dumps(selected_files),
             new_version,
             item_id
@@ -5085,8 +7856,11 @@ def respond_qcr_submit():
     response_mode = request.form.get('response_mode', 'Keep')  # Keep, Tweak, Revise
     response_category = request.form.get('response_category')
     response_text = request.form.get('response_text', '')
-    qcr_notes = request.form.get('qcr_notes', '')
+    qcr_internal_notes = request.form.get('qcr_internal_notes', '')
     selected_files = request.form.getlist('selected_files')
+    
+    # Use response_text as qcr_notes (description)
+    qcr_notes = response_text
     
     item_id = item['id']
     item_dict = dict(item)
@@ -5127,6 +7901,7 @@ def respond_qcr_submit():
             qcr_response_category = ?,
             qcr_response_text = ?,
             qcr_notes = ?,
+            qcr_internal_notes = ?,
             qcr_selected_files = ?,
             final_response_category = ?,
             final_response_text = ?,
@@ -5140,6 +7915,7 @@ def respond_qcr_submit():
         qcr_response_category,
         response_text if qc_action != 'Send Back' else None,
         qcr_notes,
+        qcr_internal_notes,
         qcr_selected_files,
         final_category,
         final_text,
@@ -5184,6 +7960,15 @@ def respond_qcr_submit():
             item_id=item_id,
             action_url=f'/api/items/{item_id}/complete',
             action_label='Mark Complete'
+        )
+        
+        # Send completion confirmation email to both QCR and reviewer with summary
+        send_qcr_completion_confirmation_email(
+            item_id, 
+            qc_action, 
+            qcr_notes, 
+            final_category=final_category, 
+            final_text=final_text
         )
     elif qc_action == 'Send Back':
         # Notification that item was sent back
@@ -5268,6 +8053,526 @@ def api_send_qcr_email(item_id):
             return jsonify(result), 400
     except Exception as e:
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+@app.route('/api/admin/send_multi_reviewer_qcr_email/<int:item_id>', methods=['POST'])
+@admin_required
+def api_send_multi_reviewer_qcr_email(item_id):
+    """Send or resend multi-reviewer QCR assignment email."""
+    try:
+        result = send_multi_reviewer_qcr_email(item_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+# =============================================================================
+# MULTI-REVIEWER API ENDPOINTS
+# =============================================================================
+
+@app.route('/api/item/<int:item_id>/multi-reviewer-mode', methods=['POST'])
+@admin_required
+def api_toggle_multi_reviewer_mode(item_id):
+    """Enable or disable multi-reviewer mode for an item."""
+    data = request.get_json()
+    enabled = data.get('enabled', False)
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE item SET multi_reviewer_mode = ? WHERE id = ?', (1 if enabled else 0, item_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'multi_reviewer_mode': enabled})
+
+@app.route('/api/item/<int:item_id>/reviewers', methods=['GET'])
+@login_required
+def api_get_item_reviewers(item_id):
+    """Get all reviewers assigned to an item."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT ir.*, u.display_name as user_display_name
+        FROM item_reviewers ir
+        LEFT JOIN user u ON ir.user_id = u.id
+        WHERE ir.item_id = ?
+        ORDER BY ir.created_at ASC
+    ''', (item_id,))
+    reviewers = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify(reviewers)
+
+@app.route('/api/item/<int:item_id>/reviewers', methods=['POST'])
+@admin_required
+def api_add_item_reviewer(item_id):
+    """Add a reviewer to an item (multi-reviewer mode)."""
+    data = request.get_json()
+    
+    user_id = data.get('user_id')
+    reviewer_name = data.get('reviewer_name')
+    reviewer_email = data.get('reviewer_email')
+    
+    if not reviewer_name or not reviewer_email:
+        return jsonify({'error': 'Reviewer name and email are required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Enable multi-reviewer mode if not already
+    cursor.execute('UPDATE item SET multi_reviewer_mode = 1 WHERE id = ?', (item_id,))
+    
+    # Generate a unique token for this reviewer
+    email_token = generate_token()
+    
+    cursor.execute('''
+        INSERT INTO item_reviewers (item_id, user_id, reviewer_name, reviewer_email, email_token)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (item_id, user_id, reviewer_name, reviewer_email, email_token))
+    
+    reviewer_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'reviewer_id': reviewer_id,
+        'message': f'Reviewer {reviewer_name} added successfully'
+    })
+
+@app.route('/api/item/<int:item_id>/reviewers/<int:reviewer_id>', methods=['DELETE'])
+@admin_required
+def api_remove_item_reviewer(item_id, reviewer_id):
+    """Remove a reviewer from an item."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM item_reviewers WHERE id = ? AND item_id = ?', (reviewer_id, item_id))
+    
+    # Check if any reviewers left, if not disable multi-reviewer mode
+    cursor.execute('SELECT COUNT(*) FROM item_reviewers WHERE item_id = ?', (item_id,))
+    count = cursor.fetchone()[0]
+    if count == 0:
+        cursor.execute('UPDATE item SET multi_reviewer_mode = 0 WHERE id = ?', (item_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True})
+
+@app.route('/api/item/<int:item_id>/send-multi-reviewer-emails', methods=['POST'])
+@admin_required
+def api_send_multi_reviewer_emails(item_id):
+    """Send assignment emails to all reviewers in multi-reviewer mode."""
+    try:
+        result = send_multi_reviewer_assignment_emails(item_id)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/item/<int:item_id>/send-back-to-reviewers', methods=['POST'])
+@admin_required
+def api_send_back_to_reviewers(item_id):
+    """Send item back to selected reviewers for revision.
+    
+    Request body:
+    {
+        "feedback": "Feedback message for reviewers",
+        "reviewer_ids": [1, 2]  // Optional - if not provided, sends to all reviewers
+    }
+    """
+    try:
+        data = request.get_json()
+        feedback = data.get('feedback', '')
+        reviewer_ids = data.get('reviewer_ids')  # None = all reviewers
+        
+        if not feedback:
+            return jsonify({'success': False, 'error': 'Feedback message is required'}), 400
+        
+        result = send_multi_reviewer_sendback_emails(item_id, feedback, reviewer_ids)
+        if result['success']:
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+def check_all_reviewers_responded(item_id):
+    """Check if all reviewers have responded.
+    
+    Checks ALL reviewers for the item, regardless of needs_response flag.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT COUNT(*) as total, 
+               SUM(CASE WHEN response_at IS NOT NULL THEN 1 ELSE 0 END) as responded
+        FROM item_reviewers
+        WHERE item_id = ?
+    ''', (item_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result['total'] == 0:
+        return False
+    
+    return result['total'] == result['responded']
+
+def get_item_reviewer_responses(item_id):
+    """Get all reviewer responses for an item."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM item_reviewers
+        WHERE item_id = ?
+        ORDER BY created_at ASC
+    ''', (item_id,))
+    responses = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return responses
+
+# =============================================================================
+# MULTI-REVIEWER MAGIC-LINK ROUTES
+# =============================================================================
+
+@app.route('/respond/multi-reviewer', methods=['GET'])
+def respond_multi_reviewer_form():
+    """Show multi-reviewer response form via magic link."""
+    token = request.args.get('token')
+    if not token:
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Missing token'), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Find the reviewer by token
+    cursor.execute('''
+        SELECT ir.*, i.*, 
+               qcr.display_name as qcr_name
+        FROM item_reviewers ir
+        JOIN item i ON ir.item_id = i.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE ir.email_token = ?
+    ''', (token,))
+    result = cursor.fetchone()
+    
+    if not result:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    item_dict = dict(result)
+    reviewer_id = result['id']
+    reviewer_name = result['reviewer_name']
+    
+    # Check if item is closed
+    is_closed = result['status'] == 'Closed'
+    
+    # Check if QCR has finalized
+    can_submit = not is_closed and result['qcr_action'] not in ['Approve', 'Modify', 'Complete']
+    
+    # Check for resubmit (QCR sent back)
+    is_resubmit = result['qcr_action'] == 'Send Back'
+    qcr_feedback = result['qcr_notes'] if is_resubmit else None
+    
+    # Get previous response
+    previous_response = None
+    if result['response_at']:
+        previous_response = {
+            'category': result['response_category'],
+            'notes': result['internal_notes']
+        }
+    
+    # Version tracking
+    version = (result['response_version'] or 0) + 1 if is_resubmit else (result['response_version'] or 0)
+    
+    # Get all reviewers for this item to show status
+    cursor.execute('''
+        SELECT reviewer_name, response_at FROM item_reviewers WHERE item_id = ?
+    ''', (result['item_id'],))
+    all_reviewers = [dict(r) for r in cursor.fetchall()]
+    
+    pending_reviewers = [r for r in all_reviewers if not r['response_at']]
+    
+    conn.close()
+    
+    return render_template_string(MULTI_REVIEWER_RESPONSE_TEMPLATE,
+        item=item_dict,
+        token=token,
+        reviewer_name=reviewer_name,
+        version=version,
+        is_closed=is_closed,
+        can_submit=can_submit,
+        is_resubmit=is_resubmit,
+        qcr_feedback=qcr_feedback,
+        previous_response=previous_response,
+        all_reviewers=all_reviewers,
+        pending_reviewers=pending_reviewers
+    )
+
+@app.route('/respond/multi-reviewer', methods=['POST'])
+def respond_multi_reviewer_submit():
+    """Handle multi-reviewer response submission."""
+    token = request.form.get('token')
+    if not token:
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Missing token'), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Find the reviewer by token
+    cursor.execute('''
+        SELECT ir.*, i.id as item_id, i.status, i.qcr_action, i.qcr_id
+        FROM item_reviewers ir
+        JOIN item i ON ir.item_id = i.id
+        WHERE ir.email_token = ?
+    ''', (token,))
+    reviewer = cursor.fetchone()
+    
+    if not reviewer:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    # Check if item is closed
+    if reviewer['status'] == 'Closed':
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, 
+            error='This item has been closed. No further changes can be submitted.'), 403
+    
+    # Check if QCR has finalized
+    if reviewer['qcr_action'] in ['Approve', 'Modify', 'Complete']:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE,
+            error='This item has been finalized. No further changes can be submitted.'), 403
+    
+    # Get form data
+    response_category = request.form.get('response_category')
+    internal_notes = request.form.get('internal_notes', '')
+    
+    # Track if this is after a send-back
+    was_sent_back = reviewer['qcr_action'] == 'Send Back'
+    new_version = (reviewer['response_version'] or 0) + 1 if was_sent_back else (reviewer['response_version'] or 0)
+    
+    # Update the reviewer record
+    cursor.execute('''
+        UPDATE item_reviewers SET
+            response_at = ?,
+            response_category = ?,
+            internal_notes = ?,
+            response_version = ?
+        WHERE id = ?
+    ''', (
+        datetime.now().isoformat(),
+        response_category,
+        internal_notes,
+        new_version,
+        reviewer['id']
+    ))
+    
+    item_id = reviewer['item_id']
+    
+    # Check if all reviewers have now responded
+    all_responded = check_all_reviewers_responded(item_id)
+    
+    if all_responded:
+        # Update item status to In QC
+        cursor.execute('''
+            UPDATE item SET 
+                status = 'In QC',
+                reviewer_response_status = 'All Responded'
+            WHERE id = ?
+        ''', (item_id,))
+        
+        # If QCR sent it back, reset QCR state
+        if was_sent_back:
+            cursor.execute('''
+                UPDATE item SET
+                    qcr_action = NULL,
+                    qcr_response_at = NULL,
+                    qcr_response_status = 'Not Sent'
+                WHERE id = ?
+            ''', (item_id,))
+        
+        conn.commit()
+        
+        # Check if QCR email was already sent (avoid duplicates)
+        cursor.execute('SELECT qcr_email_sent_at FROM item WHERE id = ?', (item_id,))
+        qcr_check = cursor.fetchone()
+        qcr_already_notified = qcr_check and qcr_check['qcr_email_sent_at'] is not None
+        
+        conn.close()
+        
+        # Send QCR assignment email now that all reviewers have responded
+        # Only send if not already sent (avoid duplicates)
+        if reviewer['qcr_id'] and not qcr_already_notified:
+            send_multi_reviewer_qcr_email(item_id)
+        
+        return render_template_string(SUCCESS_TEMPLATE,
+            message='Your review has been submitted!',
+            details='All reviewers have submitted. The QC Reviewer has been notified.'
+        )
+    else:
+        cursor.execute('''
+            UPDATE item SET status = 'In Review' WHERE id = ? AND status = 'Assigned'
+        ''', (item_id,))
+        conn.commit()
+        conn.close()
+        
+        return render_template_string(SUCCESS_TEMPLATE,
+            message='Your review has been submitted!',
+            details='Waiting for other reviewers to submit before notifying the QC Reviewer.'
+        )
+
+@app.route('/respond/multi-qcr', methods=['GET'])
+def respond_multi_qcr_form():
+    """Show QCR form for multi-reviewer items."""
+    token = request.args.get('token')
+    if not token:
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Missing token'), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT i.*, 
+               qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.email_token_qcr = ? AND i.multi_reviewer_mode = 1
+    ''', (token,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    # Check if item is closed
+    if item['status'] == 'Closed':
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE,
+            error='This item has been closed.'), 403
+    
+    # Check if already responded
+    if item['qcr_response_at'] and item['qcr_action'] in ['Approve', 'Modify', 'Complete']:
+        conn.close()
+        return render_template_string(ALREADY_RESPONDED_TEMPLATE,
+            item=dict(item),
+            response_type='qcr'
+        )
+    
+    # Get all reviewer responses
+    reviewer_responses = get_item_reviewer_responses(item['id'])
+    
+    conn.close()
+    
+    return render_template_string(MULTI_REVIEWER_QCR_TEMPLATE,
+        item=dict(item),
+        token=token,
+        reviewer_responses=reviewer_responses
+    )
+
+@app.route('/respond/multi-qcr', methods=['POST'])
+def respond_multi_qcr_submit():
+    """Handle QCR response for multi-reviewer items."""
+    token = request.form.get('token')
+    if not token:
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Missing token'), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT i.*, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.email_token_qcr = ? AND i.multi_reviewer_mode = 1
+    ''', (token,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE, error='Invalid or expired token'), 404
+    
+    if item['status'] == 'Closed':
+        conn.close()
+        return render_template_string(ERROR_PAGE_TEMPLATE,
+            error='This item has been closed.'), 403
+    
+    # Get form data
+    qc_action = request.form.get('qc_action')
+    response_category = request.form.get('response_category')
+    response_text = request.form.get('response_text', '')
+    sendback_notes = request.form.get('sendback_notes', '')
+    qcr_internal_notes = request.form.get('qcr_internal_notes', '')
+    
+    item_id = item['id']
+    
+    if qc_action == 'Send Back':
+        # Reset all reviewer responses and send emails
+        cursor.execute('''
+            UPDATE item_reviewers SET
+                response_at = NULL,
+                response_category = NULL,
+                internal_notes = NULL
+            WHERE item_id = ?
+        ''', (item_id,))
+        
+        cursor.execute('''
+            UPDATE item SET
+                status = 'In Review',
+                qcr_action = 'Send Back',
+                qcr_notes = ?,
+                qcr_internal_notes = ?,
+                qcr_response_status = 'Waiting for Revision'
+            WHERE id = ?
+        ''', (sendback_notes, qcr_internal_notes, item_id))
+        
+        conn.commit()
+        conn.close()
+        
+        # Send emails to all reviewers
+        send_multi_reviewer_sendback_emails(item_id, sendback_notes)
+        
+        return render_template_string(SUCCESS_TEMPLATE,
+            message='Sent Back to Reviewers',
+            details='All reviewers have been notified to revise their responses.'
+        )
+    else:
+        # Complete - store final response
+        cursor.execute('''
+            UPDATE item SET
+                status = 'Ready for Response',
+                qcr_response_at = ?,
+                qcr_response_status = 'Responded',
+                qcr_action = 'Complete',
+                qcr_internal_notes = ?,
+                final_response_category = ?,
+                final_response_text = ?
+            WHERE id = ?
+        ''', (
+            datetime.now().isoformat(),
+            qcr_internal_notes,
+            response_category,
+            response_text,
+            item_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Create notification
+        create_notification(
+            'qc_complete',
+            f'QC Review Complete: {item["type"]} {item["identifier"]}',
+            f'Final response: {response_category}',
+            item_id
+        )
+        
+        return render_template_string(SUCCESS_TEMPLATE,
+            message='QC Review Complete!',
+            details=f'Final response category: {response_category}. The item is now ready for response.'
+        )
 
 # =============================================================================
 # NOTIFICATIONS API

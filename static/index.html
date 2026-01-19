@@ -368,21 +368,43 @@
                         </select>
                     </div>
                     
-                    <!-- Two-Level Review Assignment -->
+                    <!-- Reviewer Assignment (Chip-based selection) -->
                     <div class="reviewer-section">
                         <div class="form-group">
-                            <label for="detail-initial-reviewer">Initial Reviewer</label>
-                            <select id="detail-initial-reviewer">
+                            <label>Initial Reviewer(s)</label>
+                            <!-- Hidden select for backward compatibility -->
+                            <select id="detail-initial-reviewer" style="display:none;">
                                 <option value="">Not Assigned</option>
-                                <!-- Users will be loaded here -->
                             </select>
+                            <div class="reviewer-chips-container" id="reviewer-chips-container">
+                                <div class="reviewer-chips-area" id="reviewer-chips-area">
+                                    <!-- Selected reviewer chips will appear here -->
+                                </div>
+                                <div class="reviewer-input-wrapper">
+                                    <input type="text" id="reviewer-search-input" placeholder="Type to search and add reviewers..." autocomplete="off">
+                                    <div class="reviewer-dropdown" id="reviewer-dropdown">
+                                        <!-- Dropdown options will be loaded here -->
+                                    </div>
+                                </div>
+                            </div>
+                            <p class="section-help-text" style="margin-top: 4px; font-size: 11px; color: #666;">
+                                Click names to add. Multiple reviewers = QCR notified when ALL respond.
+                            </p>
                         </div>
+                        
                         <div class="form-group">
                             <label for="detail-qcr">Quality Control Reviewer (QCR)</label>
-                            <select id="detail-qcr">
+                            <!-- Hidden select for form data -->
+                            <select id="detail-qcr" style="display:none;">
                                 <option value="">Not Assigned</option>
-                                <!-- Users will be loaded here -->
                             </select>
+                            <!-- Autocomplete search input -->
+                            <div class="qcr-autocomplete-container" id="qcr-autocomplete-container">
+                                <input type="text" id="qcr-search-input" placeholder="Type to search QCR..." autocomplete="off">
+                                <div class="qcr-dropdown" id="qcr-dropdown">
+                                    <!-- Dropdown options will be loaded here -->
+                                </div>
+                            </div>
                         </div>
                         <p class="reviewer-error hidden" id="reviewer-error">⚠️ Initial Reviewer and QCR must be different users</p>
                         
@@ -394,6 +416,11 @@
                             <div class="workflow-status hidden" id="workflow-status-info">
                                 <p id="workflow-status-text"></p>
                             </div>
+                        </div>
+                        
+                        <!-- Reviewer Response Status (shown when emails sent) -->
+                        <div id="reviewer-status-list" class="reviewer-status-list">
+                            <!-- Response status badges will appear here -->
                         </div>
                     </div>
                     
@@ -421,8 +448,8 @@
                     <button class="btn btn-primary btn-full" id="btn-save-item">Save Changes</button>
                 </div>
 
-                <!-- Response Section -->
-                <div class="drawer-section response-section">
+                <!-- Response Section (hidden when QCR final response exists, shown on manual modify) -->
+                <div class="drawer-section response-section" id="response-section">
                     <label class="section-label">Reviewer Response</label>
                     <div class="form-group">
                         <label for="detail-response-category">Response Category</label>

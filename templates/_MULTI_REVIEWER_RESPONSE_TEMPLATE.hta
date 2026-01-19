@@ -2,10 +2,11 @@
 <html>
 <head>
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="windows-1252">
     <title>Initial Review Response - {{ITEM_IDENTIFIER}}</title>
     <HTA:APPLICATION
-        ID="ReviewerResponseForm"
-        APPLICATIONNAME="Reviewer Response"
+        ID="MultiReviewerResponseForm"
+        APPLICATIONNAME="Multi-Reviewer Response"
         BORDER="dialog"
         BORDERSTYLE="normal"
         CAPTION="yes"
@@ -48,6 +49,16 @@
         .subtitle {
             color: #666;
             font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .reviewer-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
             margin-bottom: 24px;
         }
         .info-box {
@@ -96,50 +107,23 @@
         }
         textarea { resize: vertical; min-height: 100px; }
         
-        .file-section {
-            background: #f8f9fa;
+        .bluebeam-notice {
+            background: #dbeafe;
+            border: 1px solid #3b82f6;
             border-radius: 8px;
             padding: 16px;
-            margin-bottom: 20px;
+            margin-bottom: 24px;
         }
-        .file-list {
-            max-height: 200px;
-            overflow-y: auto;
-            margin-bottom: 12px;
+        .bluebeam-notice h3 {
+            margin: 0 0 8px 0;
+            color: #1e40af;
+            font-size: 14px;
         }
-        .file-item {
-            display: flex;
-            align-items: center;
-            padding: 8px;
-            border-radius: 6px;
-            margin-bottom: 4px;
-            background: white;
+        .bluebeam-notice p {
+            color: #1e40af;
+            margin: 0;
+            font-size: 13px;
         }
-        .file-item:hover { background: #e9ecef; }
-        .file-item input[type="checkbox"] { 
-            margin-right: 10px; 
-            width: 18px;
-            height: 18px;
-        }
-        .file-item label {
-            margin-bottom: 0;
-            font-weight: normal;
-            color: #333;
-            cursor: pointer;
-            word-break: break-all;
-            flex: 1;
-        }
-        .remove-btn {
-            background: #dc3545;
-            color: white;
-            border: none;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            cursor: pointer;
-            margin-left: 8px;
-        }
-        .remove-btn:hover { background: #c82333; }
         
         .btn {
             display: inline-block;
@@ -161,19 +145,6 @@
             cursor: not-allowed;
         }
         
-        .file-picker-btn {
-            display: inline-block;
-            padding: 10px 20px;
-            background: #667eea;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 500;
-            font-size: 14px;
-        }
-        .file-picker-btn:hover { background: #5a6fd6; }
-        
         .success-box {
             background: #d4edda;
             border: 1px solid #28a745;
@@ -185,25 +156,6 @@
         }
         .hidden { display: none !important; }
         
-        .folder-info {
-            background: #e7f3ff;
-            border: 1px solid #b3d7ff;
-            border-radius: 8px;
-            padding: 12px;
-            margin-bottom: 20px;
-            font-size: 13px;
-        }
-        .folder-info strong { color: #004085; }
-        .folder-path {
-            font-family: 'Consolas', monospace;
-            font-size: 11px;
-            background: #f8f9fa;
-            padding: 6px 10px;
-            border-radius: 4px;
-            margin-top: 8px;
-            word-break: break-all;
-            display: block;
-        }
         .open-folder-btn {
             display: inline-block;
             margin-top: 10px;
@@ -222,6 +174,7 @@
     <div class="container">
         <h1>Initial Review Response</h1>
         <p class="subtitle">{{ITEM_TYPE}} {{ITEM_IDENTIFIER}}</p>
+        <p><span class="reviewer-badge">Reviewer: {{REVIEWER_NAME}}</span></p>
         
         <div class="info-box">
             <div class="info-row">
@@ -236,24 +189,13 @@
                 <span class="info-label">Your Due Date:</span>
                 <span class="info-value" style="color: #2980b9; font-weight: bold;">{{REVIEWER_DUE_DATE}}</span>
             </div>
-            <div class="info-row">
-                <span class="info-label">QCR Due Date:</span>
-                <span class="info-value">{{QCR_DUE_DATE}}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Contractor Due:</span>
-                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Reviewer:</span>
-                <span class="info-value">{{REVIEWER_NAME}}</span>
-            </div>
         </div>
 
-        <div class="folder-info">
-            <strong>Item Folder:</strong>
-            <span class="folder-path" id="folder-path">{{FOLDER_PATH_RAW}}</span>
-            <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
+        <!-- Bluebeam Notice instead of file selection -->
+        <div class="bluebeam-notice">
+            <h3>Markups Instructions</h3>
+            <p><strong>Provide markups in the corresponding Bluebeam session.</strong></p>
+            <p style="margin-top: 8px;">Do not attach files here. All markups should be completed in the shared Bluebeam Studio session for this item.</p>
         </div>
 
         <div id="success-message" class="success-box hidden"></div>
@@ -272,32 +214,11 @@
             </div>
             
             <div class="form-group">
-                <p class="section-title">Files to Include in Response</p>
-                <div class="file-section">
-                    <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
-                        Select PDF files from the item folder to include with your response.
-                    </p>
-                    
-                    <div class="file-list" id="file-list">
-                        <p style="color: #888; padding: 8px; text-align: center;">Loading files...</p>
-                    </div>
-                    
-                    <button type="button" onclick="loadFolderFiles()" style="margin-top: 10px; padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;">Refresh File List</button>
-                    <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
-                </div>
+                <label for="internal_notes">Suggested response for QC Reviewer <span style="font-weight: normal; color: #888;">(team only - not shared externally)</span></label>
+                <textarea name="internal_notes" id="internal_notes" placeholder="Provide your suggested response text or notes for the QC Reviewer to consider..."></textarea>
             </div>
             
-            <div class="form-group">
-                <label for="notes">Description</label>
-                <textarea name="notes" id="notes" placeholder="Provide response description for the official record..."></textarea>
-            </div>
-            
-            <div class="form-group">
-                <label for="internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
-                <textarea name="internal_notes" id="internal_notes" placeholder="Add any internal notes for the QC Reviewer..."></textarea>
-            </div>
-            
-            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Submit Response</button>
+            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Submit Review</button>
         </form>
     </div>
 
@@ -315,62 +236,9 @@
         
         var fso = new ActiveXObject("Scripting.FileSystemObject");
         var shell = new ActiveXObject("WScript.Shell");
-        
-        // Get folder path from the HTML element (avoids JS escaping issues)
-        function getFolderPath() {
-            return document.getElementById("folder-path").innerText;
-        }
-
-        // Initialize on load
-        window.onload = function() {
-            loadFolderFiles();
-        };
-        
-        function openFolder() {
-            var folderPath = getFolderPath();
-            if (fso.FolderExists(folderPath)) {
-                shell.Run('explorer.exe "' + folderPath + '"', 1, false);
-            } else {
-                alert("Folder not found: " + folderPath);
-            }
-        }
-        
-        function loadFolderFiles() {
-            var folderPath = getFolderPath();
-            var fileListEl = document.getElementById("file-list");
-            
-            if (!fso.FolderExists(folderPath)) {
-                fileListEl.innerHTML = "<p style='color: #dc3545; padding: 8px;'>Folder not found</p>";
-                return;
-            }
-            
-            var folder = fso.GetFolder(folderPath);
-            var files = new Enumerator(folder.Files);
-            var html = "";
-            var count = 0;
-            
-            for (; !files.atEnd(); files.moveNext()) {
-                var file = files.item();
-                var ext = fso.GetExtensionName(file.Name).toLowerCase();
-                if (ext === "pdf") {
-                    html += "<div class='file-item'>" +
-                        "<input type='checkbox' name='selected_files' value='" + file.Name + "' id='file_" + count + "' checked>" +
-                        "<label for='file_" + count + "'>" + file.Name + "</label>" +
-                        "</div>";
-                    count++;
-                }
-            }
-            
-            if (count === 0) {
-                html = "<p style='color: #888; padding: 8px; text-align: center;'>No PDF files in folder</p>";
-            }
-            
-            fileListEl.innerHTML = html;
-        }
 
         function submitResponse() {
             var category = document.getElementById('response_category').value;
-            var notes = document.getElementById('notes').value;
             var internalNotes = document.getElementById('internal_notes').value;
             
             if (!category) {
@@ -378,16 +246,9 @@
                 return;
             }
             
-            // Gather checked files
-            var checkedFiles = [];
-            var checkboxes = document.querySelectorAll('input[name="selected_files"]:checked');
-            for (var i = 0; i < checkboxes.length; i++) {
-                checkedFiles.push(checkboxes[i].value);
-            }
-            
-            // Build response object
+            // Build response object - multi-reviewer format
             var response = {
-                _form_type: "reviewer_response",
+                _form_type: "multi_reviewer_response",
                 _version: "1.0",
                 _submitted_at: new Date().toISOString(),
                 item_id: ITEM_CONFIG.item_id,
@@ -396,17 +257,17 @@
                 reviewer_name: ITEM_CONFIG.reviewer_name,
                 reviewer_email: ITEM_CONFIG.reviewer_email,
                 response_category: category,
-                selected_files: checkedFiles,
-                notes: notes,
                 internal_notes: internalNotes
             };
             
             var jsonString = JSON.stringify(response, null, 2);
             
-            // Save to Responses folder (same folder as this HTA file)
-            // Get the folder from ITEM_CONFIG since document.location may not preserve UNC paths
+            // Save to Responses folder
             var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
-            var filePath = responsesFolder + "\\_reviewer_response.json";
+            
+            // Use reviewer name in filename to avoid conflicts
+            var safeName = ITEM_CONFIG.reviewer_name.replace(/[^a-zA-Z0-9]/g, "_");
+            var filePath = responsesFolder + "\\_multi_reviewer_response_" + safeName + ".json";
             
             try {
                 // Ensure Responses folder exists
@@ -422,18 +283,17 @@
                 document.getElementById('response-form').className = 'hidden';
                 document.getElementById('success-message').innerHTML = 
                     '<h3>Response Submitted Successfully!</h3>' +
-                    '<p style="margin-top: 10px;">Your response has been saved to the Responses folder.</p>' +
-                    '<p style="margin-top: 5px; font-size: 13px;">The tracker will automatically import it when it runs.</p>' +
-                    '<button class="open-folder-btn" onclick="openResponsesFolder()" style="margin-top: 15px;">View in Folder</button>';
+                    '<p style="margin-top: 10px;">Your response has been saved.</p>' +
+                    '<p style="margin-top: 5px; font-size: 13px;">The tracker will automatically import it. The QC Reviewer will be notified once all reviewers submit.</p>' +
+                    '<button class="open-folder-btn" onclick="closeWindow()" style="margin-top: 15px;">Close Window</button>';
                 document.getElementById('success-message').className = 'success-box';
             } catch (e) {
                 alert("Error saving response: " + e.message + "\\nPath: " + filePath);
             }
         }
         
-        function openResponsesFolder() {
-            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
-            shell.Run('explorer.exe "' + responsesFolder + '"', 1, false);
+        function closeWindow() {
+            window.close();
         }
     </script>
 </body>

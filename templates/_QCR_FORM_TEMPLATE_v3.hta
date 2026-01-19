@@ -262,10 +262,6 @@
                 <span class="info-value">{{DATE_RECEIVED}}</span>
             </div>
             <div class="info-row">
-                <span class="info-label">Contractor Due Date:</span>
-                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
-            </div>
-            <div class="info-row">
                 <span class="info-label">Priority:</span>
                 <span class="info-value">{{PRIORITY}}</span>
             </div>
@@ -274,8 +270,16 @@
                 <span class="info-value">{{REVIEWER_NAME}}</span>
             </div>
             <div class="info-row">
+                <span class="info-label">QC Reviewer:</span>
+                <span class="info-value">{{QCR_NAME}}</span>
+            </div>
+            <div class="info-row">
                 <span class="info-label">Your Due Date:</span>
                 <span class="info-value" style="color: #d97706; font-weight: bold;">{{QCR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due Date:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
             </div>
         </div>
 
@@ -297,8 +301,12 @@
                 <span class="info-value">{{REVIEWER_SELECTED_FILES_TEXT}}</span>
             </div>
             <div style="margin-top: 12px;">
-                <span class="info-label">Reviewer's Notes:</span>
+                <span class="info-label">Reviewer's Description:</span>
                 <div class="response-text-readonly" id="reviewer_notes_display">{{REVIEWER_NOTES}}</div>
+            </div>
+            <div id="reviewer-internal-notes-section" style="margin-top: 12px; padding: 10px; background: #fff8e6; border: 1px solid #ffd966; border-radius: 6px; display: {{REVIEWER_INTERNAL_NOTES_DISPLAY}};">
+                <span class="info-label" style="color: #b7791f;">[Internal] Reviewer's Notes (Team Only):</span>
+                <div style="margin-top: 6px; color: #744210; white-space: pre-wrap;">{{REVIEWER_INTERNAL_NOTES}}</div>
             </div>
         </div>
 
@@ -365,7 +373,7 @@
                 </div>
                 
                 <div style="margin-top: 15px;">
-                    <div style="font-weight: 600; margin-bottom: 8px; color: #333;">Final Response Text:</div>
+                    <div style="font-weight: 600; margin-bottom: 8px; color: #333;">Description (Final Response Text): <span class="notes-required" id="notes-required">* Required for Send Back</span></div>
                     <div class="response-text-readonly" id="response_text_readonly">{{REVIEWER_NOTES}}</div>
                     <textarea id="response_text_area" placeholder="Enter your response text...">{{REVIEWER_NOTES}}</textarea>
                 </div>
@@ -396,10 +404,10 @@
                 <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
             </div>
             
-            <!-- QC Notes (always shown) -->
-            <div class="form-group">
-                <label for="qcr_notes">QC Notes / Comments <span class="notes-required" id="notes-required">* Required for Send Back</span></label>
-                <textarea name="qcr_notes" id="qcr_notes" placeholder="Add any QC notes, conditions, or explain what changes are needed..."></textarea>
+            <!-- QC Internal Notes (always shown, required for Send Back) -->
+            <div class="form-group" id="internal-notes-group">
+                <label for="qcr_internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span> <span id="internal-notes-required" style="color: #c0392b; font-weight: bold; display: none;">* Required - explain what revisions are needed</span></label>
+                <textarea name="qcr_internal_notes" id="qcr_internal_notes" placeholder="Add any internal notes for project records..."></textarea>
             </div>
             
             <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Complete QC Review</button>
@@ -471,22 +479,47 @@
             var filesGroup = document.getElementById("files-group");
             var sendBackWarning = document.getElementById("send-back-warning");
             var notesRequired = document.getElementById("notes-required");
+            var internalNotesRequired = document.getElementById("internal-notes-required");
+            var internalNotesGroup = document.getElementById("internal-notes-group");
+            var internalNotesField = document.getElementById("qcr_internal_notes");
             var submitBtn = document.getElementById("submit-btn");
+            var textReadonly = document.getElementById("response_text_readonly");
+            var textArea = document.getElementById("response_text_area");
             
             if (action === "Send Back") {
                 responseModeGroup.style.display = "none";
                 categoryGroup.style.display = "none";
                 filesGroup.style.display = "none";
                 sendBackWarning.style.display = "block";
-                notesRequired.style.display = "inline";
+                notesRequired.style.display = "none";
+                internalNotesRequired.style.display = "inline";
+                internalNotesGroup.style.background = "#fff8e6";
+                internalNotesGroup.style.border = "2px solid #f0ad4e";
+                internalNotesGroup.style.padding = "12px";
+                internalNotesGroup.style.borderRadius = "6px";
+                internalNotesField.placeholder = "Explain what revisions are needed (this will be sent to the reviewer)...";
                 submitBtn.innerHTML = "Send Back to Reviewer";
                 submitBtn.className = "btn btn-sendback";
+                // Reset text area for non-Send Back use
+                textReadonly.style.display = "block";
+                textArea.style.display = "none";
+                textArea.value = originalReviewerText;
             } else {
                 responseModeGroup.style.display = "block";
                 categoryGroup.style.display = "block";
                 filesGroup.style.display = "block";
                 sendBackWarning.style.display = "none";
                 notesRequired.style.display = "none";
+                internalNotesRequired.style.display = "none";
+                internalNotesGroup.style.background = "";
+                internalNotesGroup.style.border = "";
+                internalNotesGroup.style.padding = "";
+                internalNotesGroup.style.borderRadius = "";
+                internalNotesField.placeholder = "Add any internal notes for project records...";
+                // Reset to Keep mode display
+                textReadonly.style.display = "block";
+                textArea.style.display = "none";
+                textArea.value = originalReviewerText;
                 
                 if (action === "Approve") {
                     submitBtn.innerHTML = "Approve &amp; Complete";
@@ -577,21 +610,7 @@
                 return;
             }
             
-            var notes = document.getElementById("qcr_notes").value;
-            
-            // Validate based on action
-            if (action === "Send Back") {
-                if (!notes.trim()) {
-                    alert("Please provide notes explaining what revisions are needed.");
-                    return;
-                }
-            } else {
-                var category = document.getElementById("response_category").value;
-                if (!category) {
-                    alert("Please select a final response category.");
-                    return;
-                }
-            }
+            var internalNotes = document.getElementById("qcr_internal_notes").value;
             
             // Get response mode and text
             var responseMode = "Keep";
@@ -604,11 +623,25 @@
             }
             
             var finalResponseText = "";
-            if (action !== "Send Back") {
-                if (responseMode === "Keep") {
-                    finalResponseText = originalReviewerText;
-                } else {
-                    finalResponseText = document.getElementById("response_text_area").value;
+            if (responseMode === "Keep") {
+                finalResponseText = originalReviewerText;
+            } else {
+                finalResponseText = document.getElementById("response_text_area").value;
+            }
+            
+            // Validate based on action
+            if (action === "Send Back") {
+                // For Send Back, require internal notes explaining what needs revision
+                if (!internalNotes.trim()) {
+                    alert("Please provide internal notes explaining what revisions are needed.");
+                    document.getElementById("qcr_internal_notes").focus();
+                    return;
+                }
+            } else {
+                var category = document.getElementById("response_category").value;
+                if (!category) {
+                    alert("Please select a final response category.");
+                    return;
                 }
             }
             
@@ -636,7 +669,8 @@
                 response_category: action !== "Send Back" ? document.getElementById("response_category").value : null,
                 response_text: finalResponseText,
                 selected_files: selectedFiles,
-                qcr_notes: notes
+                qcr_notes: action === "Send Back" ? internalNotes : finalResponseText,
+                qcr_internal_notes: internalNotes
             };
             
             var jsonString = JSON.stringify(response, null, 2);

@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="windows-1252">
+    <title>QC Review - {{ITEM_IDENTIFIER}}</title>
+    <HTA:APPLICATION
+        ID="MultiReviewerQCRForm"
+        APPLICATIONNAME="QC Review - Multi-Reviewer"
+        BORDER="dialog"
+        BORDERSTYLE="normal"
+        CAPTION="yes"
+        MAXIMIZEBUTTON="yes"
+        MINIMIZEBUTTON="yes"
+        SCROLL="yes"
+        SHOWINTASKBAR="yes"
+        SINGLEINSTANCE="no"
+        SYSMENU="yes"
+        VERSION="1.0"
+        WINDOWSTATE="normal"
+    />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            padding: 40px;
+            max-width: 800px;
+            width: 100%;
+        }
+        h1 { color: #1a1a2e; font-size: 24px; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 24px; }
+        
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .info-row { display: flex; margin-bottom: 8px; }
+        .info-row:last-child { margin-bottom: 0; }
+        .info-label { font-weight: 600; color: #444; width: 160px; flex-shrink: 0; }
+        .info-value { color: #666; }
+        
+        /* Bluebeam Notice */
+        .bluebeam-notice {
+            background: #dbeafe;
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .bluebeam-notice h3 {
+            margin: 0 0 8px 0;
+            color: #1e40af;
+            font-size: 15px;
+        }
+        .bluebeam-notice p {
+            color: #1e40af;
+            font-size: 13px;
+            margin: 0;
+        }
+        
+        /* Reviewer Response Boxes */
+        .reviewer-responses-section h3 {
+            margin: 20px 0 12px 0;
+            color: #1a1a2e;
+            font-size: 16px;
+        }
+        .reviewer-response-box {
+            background: #f0fdf4;
+            border: 1px solid #86efac;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 12px;
+        }
+        .reviewer-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .reviewer-badge {
+            display: inline-block;
+            background: #10b981;
+            color: white;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .reviewer-name {
+            font-weight: 600;
+            color: #166534;
+        }
+        .category-chip {
+            display: inline-block;
+            background: #e0e7ff;
+            color: #3730a3;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .internal-notes-box {
+            background: #fff8e6;
+            border: 1px solid #ffd966;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+        .internal-notes-box h5 {
+            margin: 0 0 6px 0;
+            color: #744210;
+            font-size: 12px;
+        }
+        .internal-notes-content {
+            color: #744210;
+            font-size: 13px;
+            white-space: pre-wrap;
+        }
+        .no-notes {
+            color: #888;
+            font-size: 13px;
+            font-style: italic;
+        }
+        
+        /* QC Action Group */
+        .action-group {
+            background: #fef3c7;
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 20px 0;
+        }
+        .action-group h3 {
+            margin: 0 0 12px 0;
+            color: #92400e;
+            font-size: 15px;
+        }
+        .radio-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .radio-option {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 12px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e5e7eb;
+            cursor: pointer;
+        }
+        .radio-option:hover { border-color: #667eea; background: #fafafa; }
+        .radio-option input[type="radio"] { margin-top: 3px; width: 18px; height: 18px; }
+        .radio-option-content { flex: 1; }
+        .radio-option-label { font-weight: 600; color: #333; }
+        .radio-option-desc { font-size: 12px; color: #666; margin-top: 4px; }
+        
+        .send-back-warning {
+            display: none;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 8px;
+            padding: 12px;
+            margin: 15px 0;
+            color: #991b1b;
+        }
+        
+        .form-group { margin-bottom: 20px; }
+        label { display: block; font-weight: 500; color: #444; margin-bottom: 6px; }
+        select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        select:focus, textarea:focus {
+            outline: none;
+            border-color: #11998e;
+        }
+        textarea { resize: vertical; min-height: 100px; }
+        
+        .complete-fields { display: none; }
+        .sendback-fields { display: none; }
+        
+        .btn {
+            display: inline-block;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        .btn:hover { opacity: 0.9; }
+        
+        .success-box {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            color: #155724;
+            text-align: center;
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QC Review - Multi-Reviewer</h1>
+        <p class="subtitle">{{ITEM_TYPE}} {{ITEM_IDENTIFIER}}</p>
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ITEM_TITLE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{DATE_RECEIVED}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Priority:</span>
+                <span class="info-value">{{PRIORITY}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QC Reviewer:</span>
+                <span class="info-value">{{QCR_NAME}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QC Due Date:</span>
+                <span class="info-value" style="color: #d97706; font-weight: bold;">{{QCR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due Date:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
+            </div>
+        </div>
+
+        <!-- Bluebeam Notice -->
+        <div class="bluebeam-notice">
+            <h3>Markups Location</h3>
+            <p>All reviewer markups are in the corresponding <strong>Bluebeam Studio session</strong> for this item. Please review the markups there before completing your QC decision.</p>
+        </div>
+
+        <!-- Reviewer Responses Section -->
+        <div class="reviewer-responses-section">
+            <h3>Reviewer Responses ({{REVIEWER_COUNT}})</h3>
+            {{REVIEWER_RESPONSES_HTML}}
+        </div>
+
+        <div id="success-message" class="success-box hidden"></div>
+
+        <form id="qcr-form">
+            <!-- QC Action Selection -->
+            <div class="action-group">
+                <h3>Your QC Decision</h3>
+                <div class="radio-group">
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Complete" onclick="handleActionChange('Complete')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Complete Response</div>
+                            <div class="radio-option-desc">Write the final response to be sent to the contractor. You'll select a category and provide the official response text.</div>
+                        </div>
+                    </label>
+                    <label class="radio-option">
+                        <input type="radio" name="qc_action" value="Send Back" onclick="handleActionChange('Send Back')">
+                        <div class="radio-option-content">
+                            <div class="radio-option-label">Send Back to Reviewers</div>
+                            <div class="radio-option-desc">Return to selected reviewers for revisions. You can choose which reviewers need to resubmit.</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="send-back-warning" id="send-back-warning">
+                <strong>Sending Back:</strong> Select which reviewers need to resubmit their response. Only selected reviewers will receive an email and need to respond before you are notified again.
+            </div>
+            
+            <!-- Complete Response Fields -->
+            <div class="complete-fields" id="complete-fields">
+                <div class="form-group">
+                    <label for="response_category">Final Response Category *</label>
+                    <select name="response_category" id="response_category">
+                        <option value="">-- Select --</option>
+                        <option value="Approved">Approved</option>
+                        <option value="Approved as Noted">Approved as Noted</option>
+                        <option value="For Record Only">For Record Only</option>
+                        <option value="Rejected">Rejected</option>
+                        <option value="Revise and Resubmit">Revise and Resubmit</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="response_text">Final Response Description *</label>
+                    <textarea name="response_text" id="response_text" placeholder="Write the official response to be sent to the contractor..."></textarea>
+                </div>
+            </div>
+            
+            <!-- Send Back Fields -->
+            <div class="sendback-fields" id="sendback-fields">
+                <div class="form-group">
+                    <label>Select Reviewers to Send Back To *</label>
+                    <div id="reviewer-checkboxes" style="background:#f8f9fa; border-radius:8px; padding:12px; margin-bottom:12px;">
+                        {{REVIEWER_CHECKBOXES_HTML}}
+                    </div>
+                    <div style="margin-bottom:12px;">
+                        <button type="button" onclick="selectAllReviewers()" style="padding:6px 12px; margin-right:8px; background:#667eea; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;">Select All</button>
+                        <button type="button" onclick="deselectAllReviewers()" style="padding:6px 12px; background:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;">Deselect All</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="sendback_notes">Revision Instructions * <span style="font-weight: normal; color: #888;">(will be sent to selected reviewers)</span></label>
+                    <textarea name="sendback_notes" id="sendback_notes" placeholder="Explain what revisions are needed from the reviewers..."></textarea>
+                </div>
+            </div>
+            
+            <!-- Internal Notes (always available) -->
+            <div class="form-group">
+                <label for="qcr_internal_notes">QCR Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="qcr_internal_notes" id="qcr_internal_notes" placeholder="Add any internal notes for project records..."></textarea>
+            </div>
+            
+            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Complete QC Review</button>
+        </form>
+    </div>
+
+    <script language="JavaScript">
+        var ITEM_CONFIG = {
+            item_id: {{ITEM_ID}},
+            item_type: "{{ITEM_TYPE}}",
+            identifier: "{{ITEM_IDENTIFIER}}",
+            title: "{{ITEM_TITLE}}",
+            token: "{{TOKEN}}",
+            qcr_name: "{{QCR_NAME}}",
+            qcr_email: "{{QCR_EMAIL}}",
+            folder_path: "{{FOLDER_PATH}}",
+            reviewer_count: {{REVIEWER_COUNT}},
+            reviewers: {{REVIEWERS_JSON}}
+        };
+        
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var shell = new ActiveXObject("WScript.Shell");
+        
+        var selectedAction = "";
+        
+        function handleActionChange(action) {
+            selectedAction = action;
+            
+            var completeFields = document.getElementById("complete-fields");
+            var sendbackFields = document.getElementById("sendback-fields");
+            var sendbackWarning = document.getElementById("send-back-warning");
+            
+            if (action === "Complete") {
+                completeFields.style.display = "block";
+                sendbackFields.style.display = "none";
+                sendbackWarning.style.display = "none";
+            } else if (action === "Send Back") {
+                completeFields.style.display = "none";
+                sendbackFields.style.display = "block";
+                sendbackWarning.style.display = "block";
+            }
+        }
+        
+        function selectAllReviewers() {
+            var checkboxes = document.querySelectorAll('input[name="sendback_reviewers"]');
+            for (var i = 0; i < checkboxes.length; i++) {
+                checkboxes[i].checked = true;
+            }
+        }
+        
+        function deselectAllReviewers() {
+            var checkboxes = document.querySelectorAll('input[name="sendback_reviewers"]');
+            for (var i = 0; i < checkboxes.length; i++) {
+                checkboxes[i].checked = false;
+            }
+        }
+        
+        function getSelectedReviewerIds() {
+            var checkboxes = document.querySelectorAll('input[name="sendback_reviewers"]:checked');
+            var ids = [];
+            for (var i = 0; i < checkboxes.length; i++) {
+                ids.push(parseInt(checkboxes[i].value));
+            }
+            return ids;
+        }
+        
+        function submitResponse() {
+            if (!selectedAction) {
+                alert("Please select a QC decision (Complete or Send Back).");
+                return;
+            }
+            
+            var internalNotes = document.getElementById("qcr_internal_notes").value;
+            
+            var response = {
+                _form_type: "multi_reviewer_qcr_response",
+                _version: "1.0",
+                _submitted_at: new Date().toISOString(),
+                item_id: ITEM_CONFIG.item_id,
+                identifier: ITEM_CONFIG.identifier,
+                token: ITEM_CONFIG.token,
+                qcr_name: ITEM_CONFIG.qcr_name,
+                qcr_action: selectedAction,
+                qcr_internal_notes: internalNotes
+            };
+            
+            if (selectedAction === "Complete") {
+                var category = document.getElementById("response_category").value;
+                var responseText = document.getElementById("response_text").value;
+                
+                if (!category) {
+                    alert("Please select a response category.");
+                    return;
+                }
+                if (!responseText.trim()) {
+                    alert("Please enter a response description.");
+                    return;
+                }
+                
+                response.response_category = category;
+                response.response_text = responseText;
+            } else {
+                var sendbackNotes = document.getElementById("sendback_notes").value;
+                if (!sendbackNotes.trim()) {
+                    alert("Please provide revision instructions for the reviewers.");
+                    return;
+                }
+                
+                var selectedReviewerIds = getSelectedReviewerIds();
+                if (selectedReviewerIds.length === 0) {
+                    alert("Please select at least one reviewer to send back to.");
+                    return;
+                }
+                
+                response.sendback_notes = sendbackNotes;
+                response.sendback_reviewer_ids = selectedReviewerIds;
+            }
+            
+            var jsonString = JSON.stringify(response, null, 2);
+            
+            // Save to Responses folder
+            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            var filePath = responsesFolder + "\\_multi_reviewer_qcr_response.json";
+            
+            try {
+                // Ensure Responses folder exists
+                if (!fso.FolderExists(responsesFolder)) {
+                    fso.CreateFolder(responsesFolder);
+                }
+                
+                var file = fso.CreateTextFile(filePath, true, false);
+                file.Write(jsonString);
+                file.Close();
+                
+                // Success!
+                document.getElementById("qcr-form").className = "hidden";
+                document.getElementById("success-message").innerHTML = 
+                    "<h3>QC Review Submitted!</h3>" +
+                    "<p style='margin-top: 10px;'>Your " + selectedAction.toLowerCase() + " decision has been saved.</p>" +
+                    "<p style='margin-top: 5px; font-size: 13px;'>The tracker will automatically process it.</p>" +
+                    "<button class='btn' onclick='closeWindow()' style='margin-top: 15px; width: auto; padding: 10px 20px;'>Close Window</button>";
+                document.getElementById("success-message").className = "success-box";
+            } catch (e) {
+                alert("Error saving response: " + e.message + "\\nPath: " + filePath);
+            }
+        }
+        
+        function closeWindow() {
+            window.close();
+        }
+    </script>
+</body>
+</html>

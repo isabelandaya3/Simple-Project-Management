@@ -529,7 +529,8 @@ function updatePollingStatus(status) {
 }
 
 /**
- * Update all reviewer dropdowns
+ * Update all reviewer dropdowns - now just updates hidden selects for form data
+ * The visible UI uses autocomplete inputs
  */
 function updateAssignedDropdown() {
     const userOptions = '<option value="">Not Assigned</option>' +
@@ -537,8 +538,15 @@ function updateAssignedDropdown() {
             `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`
         ).join('');
     
-    document.getElementById('detail-initial-reviewer').innerHTML = userOptions;
-    document.getElementById('detail-qcr').innerHTML = userOptions;
+    // Update hidden selects (used for form submission)
+    const initialReviewerSelect = document.getElementById('detail-initial-reviewer');
+    const qcrSelect = document.getElementById('detail-qcr');
+    
+    if (initialReviewerSelect) initialReviewerSelect.innerHTML = userOptions;
+    if (qcrSelect) qcrSelect.innerHTML = userOptions;
+    
+    // Store users for autocomplete
+    allUsersForChips = state.users;
 }
 
 // =============================================================================
@@ -628,9 +636,23 @@ function populateDetailDrawer(item) {
     // Clear reviewer error
     hide('reviewer-error');
     
-    // Response fields
-    document.getElementById('detail-response-category').value = item.response_category || '';
-    document.getElementById('detail-response-text').value = item.response_text || '';
+    // Check if QCR has provided final response (Approve or Modify action)
+    const hasQcrFinalResponse = item.qcr_response_at && (item.qcr_action === 'Approve' || item.qcr_action === 'Modify');
+    const responseSection = document.getElementById('response-section');
+    
+    if (hasQcrFinalResponse) {
+        // Hide manual response section when QCR has finalized
+        hide(responseSection);
+    } else {
+        // Show manual response section when no QCR final response yet
+        show(responseSection);
+    }
+    
+    // Response fields - use final response values if available, otherwise fall back to item values
+    const finalCategory = item.final_response_category || item.response_category || '';
+    const finalText = item.final_response_text || item.qcr_notes || item.response_text || '';
+    document.getElementById('detail-response-category').value = finalCategory;
+    document.getElementById('detail-response-text').value = finalText;
     
     // Load files section - show checkboxes for file selection
     const folderPath = item.folder_link;
@@ -666,6 +688,13 @@ function populateDetailDrawer(item) {
     
     // Update workflow status in drawer
     updateDrawerWorkflowStatus(item);
+    
+    // Load reviewers using the new chip-based system
+    loadReviewerChips(item);
+    
+    // Initialize QCR autocomplete and set value
+    initQcrAutocomplete();
+    setQcrFromItem(item);
 }
 
 /**
@@ -731,13 +760,16 @@ async function saveItem() {
         return;
     }
     
+    // Get QCR ID - prefer selectedQcrUser, fall back to hidden select
+    const qcrId = selectedQcrUser ? selectedQcrUser.id : document.getElementById('detail-qcr').value;
+    
     const data = {
         title: document.getElementById('detail-title-input').value,
         due_date: document.getElementById('detail-due-date').value || null,
         priority: document.getElementById('detail-priority').value || null,
         status: document.getElementById('detail-status').value,
         initial_reviewer_id: document.getElementById('detail-initial-reviewer').value || null,
-        qcr_id: document.getElementById('detail-qcr').value || null,
+        qcr_id: qcrId || null,
         initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
         qcr_due_date: document.getElementById('detail-qcr-due').value || null,
         notes: document.getElementById('detail-notes').value
@@ -1152,25 +1184,37 @@ async function handleSendToReviewer() {
     // Capture the item ID before saveItem clears it
     const itemId = state.selectedItemId;
     
-    // First save any changes
-    const reviewerId = document.getElementById('detail-initial-reviewer').value;
-    const qcrId = document.getElementById('detail-qcr').value;
+    // Check if we have reviewers using chip system
+    const hasReviewers = selectedReviewerChips && selectedReviewerChips.length > 0;
     
-    if (!reviewerId || !qcrId) {
-        alert('Please assign both an Initial Reviewer and a QCR before sending.');
+    // Check QCR - use either the selectedQcrUser object or the hidden select
+    const qcrId = selectedQcrUser ? selectedQcrUser.id : document.getElementById('detail-qcr').value;
+    
+    if (!hasReviewers) {
+        alert('Please add at least one Initial Reviewer before sending.');
         return;
     }
     
-    if (reviewerId === qcrId) {
-        alert('Initial Reviewer and QCR must be different users.');
+    if (!qcrId) {
+        alert('Please assign a QCR before sending.');
         return;
     }
     
-    // Save the item first to ensure reviewers are up to date
+    // Check for conflict - QCR shouldn't be one of the reviewers
+    if (selectedQcrUser) {
+        const qcrEmail = selectedQcrUser.email.toLowerCase();
+        const isConflict = selectedReviewerChips.some(c => c.email.toLowerCase() === qcrEmail);
+        if (isConflict) {
+            alert('QCR cannot be one of the Initial Reviewers.');
+            return;
+        }
+    }
+    
+    // Save the item first to ensure QCR is saved
     await saveItem();
     
-    // Then send the email using the captured ID
-    await sendReviewerEmail(itemId);
+    // Always use multi-reviewer endpoint since reviewers are stored in item_reviewers table
+    await handleSendToReviewers(itemId, qcrId);
 }
 
 /**
@@ -1353,8 +1397,8 @@ async function markAllNotificationsRead() {
 async function deleteNotification(id) {
     try {
         await api(`/notifications/${id}`, { method: 'DELETE' });
-        loadNotifications();
-        updateNotificationCount();
+        await loadNotifications();
+        await updateNotificationCount();
     } catch (err) {
         console.error('Failed to delete notification:', err);
         showToast('Failed to delete notification', 'error');
@@ -1432,26 +1476,38 @@ async function updateNotificationCount() {
 }
 
 /**
- * Update send button state based on current dropdown values
+ * Update send button state based on current selections
  */
 function updateSendButtonState() {
     const sendBtn = document.getElementById('btn-send-to-reviewer');
-    const reviewerId = document.getElementById('detail-initial-reviewer').value;
-    const qcrId = document.getElementById('detail-qcr').value;
+    if (!sendBtn) return;
     
-    // Check if both reviewers are selected in dropdowns
-    const hasReviewers = reviewerId && qcrId && reviewerId !== '' && qcrId !== '';
-    const sameReviewer = reviewerId === qcrId;
+    // Check if we have reviewers using the chip system
+    const hasReviewers = selectedReviewerChips && selectedReviewerChips.length > 0;
+    
+    // Check if QCR is selected
+    const qcrId = document.getElementById('detail-qcr').value;
+    const hasQcr = qcrId && qcrId !== '';
+    
+    // Check for same reviewer (QCR shouldn't be in reviewer chips)
+    const qcrEmail = selectedQcrUser ? selectedQcrUser.email.toLowerCase() : '';
+    const sameReviewer = hasReviewers && selectedReviewerChips.some(c => c.email.toLowerCase() === qcrEmail);
     
     if (!hasReviewers) {
         sendBtn.disabled = true;
-        sendBtn.textContent = '📧 Assign Reviewers First';
+        sendBtn.textContent = '📧 Add Reviewer First';
+    } else if (!hasQcr) {
+        sendBtn.disabled = true;
+        sendBtn.textContent = '📧 Assign QCR First';
     } else if (sameReviewer) {
         sendBtn.disabled = true;
-        sendBtn.textContent = '⚠️ Reviewers Must Be Different';
+        sendBtn.textContent = '⚠️ QCR Cannot Be Reviewer';
     } else {
         sendBtn.disabled = false;
-        sendBtn.textContent = '📧 Send to Reviewer';
+        const reviewerCount = selectedReviewerChips.length;
+        sendBtn.textContent = reviewerCount > 1 
+            ? `📧 Send to ${reviewerCount} Reviewers` 
+            : '📧 Send to Reviewer';
     }
 }
 
@@ -1491,7 +1547,15 @@ function updateDrawerWorkflowStatus(item) {
             statusHtml += `<p class="success"><strong>Reviewer Response:</strong> ${formatDateTime(item.reviewer_response_at)}</p>`;
             statusHtml += `<p><strong>Reviewer Category:</strong> ${item.reviewer_response_category || 'N/A'}</p>`;
             if (item.reviewer_notes) {
-                statusHtml += `<p><strong>Reviewer Notes:</strong> ${escapeHtml(item.reviewer_notes.substring(0, 100))}${item.reviewer_notes.length > 100 ? '...' : ''}</p>`;
+                statusHtml += `<p style="margin: 8px 0 3px 0;"><strong>Reviewer Description:</strong></p>`;
+                statusHtml += `<div style="background: #f9fafb; padding: 8px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; font-size: 0.9rem; word-wrap: break-word;">${escapeHtml(item.reviewer_notes)}</div>`;
+            }
+            // Show reviewer internal notes (team only)
+            if (item.reviewer_internal_notes) {
+                statusHtml += `<div style="background: #fff8e6; padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid #ffd966;">`;
+                statusHtml += `<p style="margin: 0 0 5px 0;"><strong style="color: #b7791f;">🔒 Reviewer's Internal Notes (Team Only):</strong></p>`;
+                statusHtml += `<div style="color: #744210; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(item.reviewer_internal_notes)}</div>`;
+                statusHtml += `</div>`;
             }
             // Show reviewer selected files
             if (item.reviewer_selected_files) {
@@ -1520,7 +1584,15 @@ function updateDrawerWorkflowStatus(item) {
                     statusHtml += `<p><strong>Response Mode:</strong> ${item.qcr_response_mode}</p>`;
                 }
                 if (item.qcr_notes) {
-                    statusHtml += `<p><strong>QCR Notes:</strong> ${escapeHtml(item.qcr_notes)}</p>`;
+                    statusHtml += `<p style="margin: 8px 0 3px 0;"><strong>QCR Notes:</strong></p>`;
+                    statusHtml += `<div style="background: #f9fafb; padding: 8px; border-radius: 4px; margin-top: 4px; white-space: pre-wrap; font-size: 0.9rem; word-wrap: break-word;">${escapeHtml(item.qcr_notes)}</div>`;
+                }
+                // Show QCR internal notes (team only)
+                if (item.qcr_internal_notes) {
+                    statusHtml += `<div style="background: #fff8e6; padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid #ffd966;">`;
+                    statusHtml += `<p style="margin: 0 0 5px 0;"><strong style="color: #b7791f;">🔒 QCR's Internal Notes (Team Only):</strong></p>`;
+                    statusHtml += `<div style="color: #744210; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(item.qcr_internal_notes)}</div>`;
+                    statusHtml += `</div>`;
                 }
                 
                 // Show QCR's modified response text if they edited it (Tweak/Revise mode)
@@ -1534,7 +1606,8 @@ function updateDrawerWorkflowStatus(item) {
                 // Show final response if available
                 if (item.final_response_category) {
                     statusHtml += `<hr style="margin: 10px 0; border-color: #10b981;">`;
-                    statusHtml += `<div style="background: #ecfdf5; padding: 10px; border-radius: 6px; margin-top: 8px;">`;
+                    statusHtml += `<div style="background: #ecfdf5; padding: 10px; border-radius: 6px; margin-top: 8px; position: relative;">`;
+                    statusHtml += `<button onclick="showManualModifyResponse()" style="position: absolute; top: 8px; right: 8px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 12px;" title="Manually modify response">✏️</button>`;
                     statusHtml += `<p style="margin: 0 0 5px 0;"><strong style="color: #059669;">📋 FINAL RESPONSE</strong></p>`;
                     statusHtml += `<p style="margin: 3px 0;"><strong>Category:</strong> ${item.final_response_category}</p>`;
                     // Include QCR notes in final response
@@ -1649,7 +1722,7 @@ async function saveResponse() {
     const data = {
         response_category: document.getElementById('detail-response-category').value || null,
         response_text: document.getElementById('detail-response-text').value || null,
-        response_files: selectedFiles.length > 0 ? selectedFiles.join(', ') : null
+        response_files: selectedFiles.length > 0 ? selectedFiles : null
     };
     
     try {
@@ -1663,9 +1736,34 @@ async function saveResponse() {
         const originalText = btn.textContent;
         btn.textContent = '✓ Saved!';
         setTimeout(() => btn.textContent = originalText, 1500);
+        
+        // Reload items to refresh the display
+        await loadItems();
+        
+        // Re-select the item to update the drawer
+        if (state.selectedItemId) {
+            const updatedItem = state.items.find(i => i.id === state.selectedItemId);
+            if (updatedItem) {
+                populateDetailDrawer(updatedItem);
+            }
+        }
     } catch (e) {
         alert('Failed to save response: ' + e.message);
     }
+}
+
+/**
+ * Show the manual modify response section (when QCR has already provided final response)
+ * This allows the user to manually adjust the response before closeout
+ */
+function showManualModifyResponse() {
+    const responseSection = document.getElementById('response-section');
+    
+    // Show response section for editing (it's already prefilled from populateDetailDrawer)
+    show(responseSection);
+    
+    // Scroll to response section
+    responseSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // =============================================================================
@@ -1743,8 +1841,14 @@ async function deleteItem() {
     try {
         await api(`/items/${state.selectedItemId}?delete_folder=${deleteFolder}`, { method: 'DELETE' });
         
-        // Close drawer and refresh
+        // Close drawer first
         closeDetailDrawer();
+        
+        // Remove item from state immediately for instant UI feedback
+        state.items = state.items.filter(item => item.id !== state.selectedItemId);
+        renderItems();
+        
+        // Then reload from server to ensure sync
         await loadItems();
         await loadStats();
         
@@ -2300,11 +2404,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-open-folder').addEventListener('click', openFolder);
     document.getElementById('btn-open-email').addEventListener('click', openOriginalEmail);
     
-    // Reviewer validation - check when either reviewer dropdown changes
-    document.getElementById('detail-initial-reviewer').addEventListener('change', () => {
-        validateReviewers();
-        updateSendButtonState();
-    });
+    // QCR dropdown change handler
     document.getElementById('detail-qcr').addEventListener('change', () => {
         validateReviewers();
         updateSendButtonState();
@@ -2389,5 +2489,462 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initial auth check
     checkAuth();
 });
+
+// =============================================================================
+// REVIEWER CHIPS FUNCTIONS (Tag-based multi-reviewer selection)
+// =============================================================================
+
+/**
+ * State for reviewer chips
+ */
+let selectedReviewerChips = [];
+let allUsersForChips = [];
+
+/**
+ * Load reviewer chips for an item - shows existing reviewers as chips and allows adding more
+ */
+async function loadReviewerChips(item) {
+    const container = document.getElementById('reviewer-chips-container');
+    const statusList = document.getElementById('reviewer-status-list');
+    const searchInput = document.getElementById('reviewer-search-input');
+    const dropdown = document.getElementById('reviewer-dropdown');
+    
+    if (!container) return;
+    
+    // Load all users for dropdown
+    try {
+        allUsersForChips = await api('/users');
+    } catch (e) {
+        console.error('Failed to load users for chips:', e);
+        allUsersForChips = [];
+    }
+    
+    // Load existing reviewers for this item
+    let existingReviewers = [];
+    if (item.id) {
+        try {
+            existingReviewers = await api(`/item/${item.id}/reviewers`);
+        } catch (e) {
+            console.error('Failed to load existing reviewers:', e);
+        }
+    }
+    
+    // Initialize selected chips from existing reviewers
+    selectedReviewerChips = existingReviewers.map(r => ({
+        id: r.id,
+        user_id: r.reviewer_email, // Use email as identifier
+        name: r.reviewer_name,
+        email: r.reviewer_email,
+        status: r.status || 'pending',
+        response_category: r.response_category,
+        isExisting: true
+    }));
+    
+    // Render chips
+    renderReviewerChips();
+    
+    // Render status list for existing reviewers with status
+    renderReviewerStatusList(existingReviewers);
+    
+    // Set up search input
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.oninput = () => filterReviewerDropdown(searchInput.value);
+        searchInput.onfocus = () => {
+            filterReviewerDropdown(searchInput.value);
+            dropdown.classList.add('show');
+        };
+    }
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.reviewer-chips-section')) {
+            dropdown?.classList.remove('show');
+        }
+    });
+}
+
+/**
+ * Render the reviewer chips in the input area
+ */
+function renderReviewerChips() {
+    const chipsArea = document.getElementById('reviewer-chips-area');
+    if (!chipsArea) return;
+    
+    chipsArea.innerHTML = selectedReviewerChips.map((chip, index) => {
+        const statusClass = chip.status === 'responded' ? 'responded' : 
+                           chip.status === 'sent' ? 'sent' : '';
+        return `
+            <span class="reviewer-chip ${statusClass}" data-index="${index}">
+                <span class="chip-name">${escapeHtml(chip.name)}</span>
+                <button class="chip-remove" onclick="removeReviewerChip(${index})" title="Remove ${escapeHtml(chip.name)}">×</button>
+            </span>
+        `;
+    }).join('');
+    
+    // Update the Send button text based on reviewer count
+    updateSendToReviewerButton();
+}
+
+/**
+ * Filter and show the reviewer dropdown based on search text
+ */
+function filterReviewerDropdown(searchText) {
+    const dropdown = document.getElementById('reviewer-dropdown');
+    if (!dropdown) return;
+    
+    const search = searchText.toLowerCase();
+    
+    // Filter users that aren't already selected
+    const selectedEmails = selectedReviewerChips.map(c => c.email.toLowerCase());
+    const available = allUsersForChips.filter(user => {
+        const isSelected = selectedEmails.includes(user.email.toLowerCase());
+        const matchesSearch = !search || 
+            user.display_name.toLowerCase().includes(search) || 
+            user.email.toLowerCase().includes(search);
+        return !isSelected && matchesSearch;
+    });
+    
+    if (available.length === 0) {
+        dropdown.innerHTML = '<div class="dropdown-empty">No matching users</div>';
+    } else {
+        dropdown.innerHTML = available.map(user => `
+            <div class="dropdown-item" onclick="addReviewerChip('${escapeHtml(user.display_name)}', '${escapeHtml(user.email)}')">
+                <span class="dropdown-name">${escapeHtml(user.display_name)}</span>
+                <span class="dropdown-email">${escapeHtml(user.email)}</span>
+            </div>
+        `).join('');
+    }
+    
+    dropdown.classList.add('show');
+}
+
+/**
+ * Add a reviewer chip
+ */
+async function addReviewerChip(name, email) {
+    // Check if already selected
+    if (selectedReviewerChips.some(c => c.email.toLowerCase() === email.toLowerCase())) {
+        return;
+    }
+    
+    const chip = {
+        name: name,
+        email: email,
+        status: 'pending',
+        isExisting: false
+    };
+    
+    // If we have an item selected, save to database immediately
+    if (state.selectedItemId) {
+        try {
+            const result = await api(`/item/${state.selectedItemId}/reviewers`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    reviewer_name: name,
+                    reviewer_email: email
+                })
+            });
+            chip.id = result.reviewer_id;  // API returns reviewer_id, not id
+            chip.isExisting = true;
+        } catch (e) {
+            console.error('Failed to add reviewer:', e);
+            alert('Failed to add reviewer: ' + e.message);
+            return;
+        }
+    }
+    
+    selectedReviewerChips.push(chip);
+    renderReviewerChips();
+    
+    // Clear and hide dropdown
+    const searchInput = document.getElementById('reviewer-search-input');
+    const dropdown = document.getElementById('reviewer-dropdown');
+    if (searchInput) searchInput.value = '';
+    if (dropdown) dropdown.classList.remove('show');
+    
+    // Update button state
+    updateSendButtonState();
+    
+    // Reload status list
+    if (state.selectedItemId) {
+        const reviewers = await api(`/item/${state.selectedItemId}/reviewers`);
+        renderReviewerStatusList(reviewers);
+    }
+}
+
+/**
+ * Remove a reviewer chip
+ */
+async function removeReviewerChip(index) {
+    const chip = selectedReviewerChips[index];
+    if (!chip) return;
+    
+    // If it's saved in database, delete it
+    if (chip.isExisting && chip.id && state.selectedItemId) {
+        try {
+            await api(`/item/${state.selectedItemId}/reviewers/${chip.id}`, {
+                method: 'DELETE'
+            });
+        } catch (e) {
+            console.error('Failed to remove reviewer:', e);
+            alert('Failed to remove reviewer: ' + e.message);
+            return;
+        }
+    }
+    
+    selectedReviewerChips.splice(index, 1);
+    renderReviewerChips();
+    
+    // Update button state
+    updateSendButtonState();
+    
+    // Reload status list
+    if (state.selectedItemId) {
+        const reviewers = await api(`/item/${state.selectedItemId}/reviewers`);
+        renderReviewerStatusList(reviewers);
+    }
+}
+
+/**
+ * Render the status list showing reviewer response status
+ */
+function renderReviewerStatusList(reviewers) {
+    const statusList = document.getElementById('reviewer-status-list');
+    if (!statusList) return;
+    
+    const sentOrResponded = reviewers.filter(r => r.status && r.status !== 'pending');
+    
+    if (sentOrResponded.length === 0) {
+        statusList.innerHTML = '';
+        return;
+    }
+    
+    statusList.innerHTML = `
+        <div class="status-list-header">Reviewer Status:</div>
+        ${sentOrResponded.map(r => {
+            const statusClass = r.status === 'responded' ? 'responded' : 'sent';
+            const statusText = r.status === 'responded' ? 
+                `✓ ${r.response_category || 'Responded'}` : 
+                '📧 Email Sent';
+            return `
+                <div class="reviewer-status-item ${statusClass}">
+                    <span class="status-name">${escapeHtml(r.reviewer_name)}</span>
+                    <span class="status-badge">${statusText}</span>
+                </div>
+            `;
+        }).join('')}
+    `;
+}
+
+/**
+ * Update the Send to Reviewer button based on selected chips
+ */
+function updateSendToReviewerButton() {
+    // Just call the main update function which handles all logic
+    updateSendButtonState();
+}
+
+/**
+ * Handle sending to reviewer(s) - automatically uses multi-reviewer if more than one selected
+ */
+async function handleSendToReviewers(itemId = null, qcrIdParam = null) {
+    // Use passed itemId or fall back to state
+    const targetItemId = itemId || state.selectedItemId;
+    if (!targetItemId) return;
+    
+    const reviewerCount = selectedReviewerChips.length;
+    
+    // Get QCR ID from param, selectedQcrUser, or hidden select
+    const qcrId = qcrIdParam || (selectedQcrUser ? selectedQcrUser.id : document.getElementById('detail-qcr').value);
+    
+    if (reviewerCount === 0) {
+        alert('Please select at least one reviewer by typing their name above.');
+        return;
+    }
+    
+    if (!qcrId) {
+        alert('Please assign a QCR before sending to reviewers.');
+        return;
+    }
+    
+    try {
+        // Save QCR assignment and set multi-reviewer mode if needed
+        await api(`/item/${targetItemId}`, {
+            method: 'POST',
+            body: JSON.stringify({
+                qcr_id: qcrId,
+                multi_reviewer_mode: reviewerCount > 1 ? 1 : 0
+            })
+        });
+        
+        // Send emails to all reviewers
+        const result = await api(`/item/${targetItemId}/send-multi-reviewer-emails`, {
+            method: 'POST'
+        });
+        
+        alert(result.message || 'Email(s) sent successfully!');
+        
+        // Reload chips and items
+        const reviewers = await api(`/item/${targetItemId}/reviewers`);
+        selectedReviewerChips = reviewers.map(r => ({
+            id: r.id,
+            name: r.reviewer_name,
+            email: r.reviewer_email,
+            status: r.status || 'pending',
+            response_category: r.response_category,
+            isExisting: true
+        }));
+        renderReviewerChips();
+        renderReviewerStatusList(reviewers);
+        
+        await loadItems();
+    } catch (e) {
+        alert('Failed to send emails: ' + e.message);
+    }
+}
+
+// =============================================================================
+// QCR AUTOCOMPLETE FUNCTIONS
+// =============================================================================
+
+let selectedQcrUser = null;
+
+/**
+ * Initialize QCR autocomplete
+ */
+function initQcrAutocomplete() {
+    const searchInput = document.getElementById('qcr-search-input');
+    const dropdown = document.getElementById('qcr-dropdown');
+    
+    if (!searchInput) return;
+    
+    searchInput.oninput = () => filterQcrDropdown(searchInput.value);
+    searchInput.onfocus = () => {
+        filterQcrDropdown(searchInput.value);
+        dropdown.classList.add('show');
+    };
+    
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.qcr-autocomplete-container')) {
+            dropdown?.classList.remove('show');
+        }
+    });
+}
+
+/**
+ * Filter and show the QCR dropdown based on search text
+ */
+function filterQcrDropdown(searchText) {
+    const dropdown = document.getElementById('qcr-dropdown');
+    if (!dropdown) return;
+    
+    const search = searchText.toLowerCase();
+    
+    // Filter users - exclude currently selected reviewers to avoid conflict
+    const selectedReviewerEmails = selectedReviewerChips.map(c => c.email.toLowerCase());
+    const available = allUsersForChips.filter(user => {
+        const matchesSearch = !search || 
+            user.display_name.toLowerCase().includes(search) || 
+            user.email.toLowerCase().includes(search);
+        return matchesSearch;
+    });
+    
+    if (available.length === 0) {
+        dropdown.innerHTML = '<div class="dropdown-empty">No matching users</div>';
+    } else {
+        dropdown.innerHTML = available.map(user => {
+            const isSelected = selectedQcrUser && selectedQcrUser.id === user.id;
+            const isReviewer = selectedReviewerEmails.includes(user.email.toLowerCase());
+            return `
+                <div class="dropdown-item ${isSelected ? 'selected' : ''} ${isReviewer ? 'reviewer-warning' : ''}" 
+                     onclick="selectQcr(${user.id}, '${escapeHtml(user.display_name)}', '${escapeHtml(user.email)}')"
+                     ${isReviewer ? 'title="This user is already a reviewer"' : ''}>
+                    <span class="dropdown-name">${escapeHtml(user.display_name)}${isReviewer ? ' ⚠️' : ''}</span>
+                    <span class="dropdown-email">${escapeHtml(user.email)}</span>
+                </div>
+            `;
+        }).join('');
+    }
+    
+    dropdown.classList.add('show');
+}
+
+/**
+ * Select a QCR user
+ */
+function selectQcr(userId, name, email) {
+    const searchInput = document.getElementById('qcr-search-input');
+    const dropdown = document.getElementById('qcr-dropdown');
+    const hiddenSelect = document.getElementById('detail-qcr');
+    
+    // Update hidden select value
+    if (hiddenSelect) {
+        hiddenSelect.value = userId;
+    }
+    
+    // Update search input display
+    if (searchInput) {
+        searchInput.value = name;
+        searchInput.classList.add('has-value');
+    }
+    
+    // Store selected user
+    selectedQcrUser = { id: userId, name: name, email: email };
+    
+    // Hide dropdown
+    if (dropdown) {
+        dropdown.classList.remove('show');
+    }
+    
+    // Validate and update button state
+    validateReviewers();
+    updateSendButtonState();
+}
+
+/**
+ * Clear QCR selection
+ */
+function clearQcrSelection() {
+    const searchInput = document.getElementById('qcr-search-input');
+    const hiddenSelect = document.getElementById('detail-qcr');
+    
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.classList.remove('has-value');
+    }
+    
+    if (hiddenSelect) {
+        hiddenSelect.value = '';
+    }
+    
+    selectedQcrUser = null;
+}
+
+/**
+ * Set QCR from item data (when loading an item)
+ */
+function setQcrFromItem(item) {
+    const searchInput = document.getElementById('qcr-search-input');
+    const hiddenSelect = document.getElementById('detail-qcr');
+    
+    if (item.qcr_id && item.qcr_name) {
+        if (searchInput) {
+            searchInput.value = item.qcr_name;
+            searchInput.classList.add('has-value');
+        }
+        if (hiddenSelect) {
+            hiddenSelect.value = item.qcr_id;
+        }
+        selectedQcrUser = { id: item.qcr_id, name: item.qcr_name, email: item.qcr_email || '' };
+    } else {
+        clearQcrSelection();
+    }
+}
+
 // Global function aliases for onclick handlers in HTML
 window.openItem = openDetailDrawer;
+window.removeReviewerChip = removeReviewerChip;
+window.addReviewerChip = addReviewerChip;
+window.selectQcr = selectQcr;
