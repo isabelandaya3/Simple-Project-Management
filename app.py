@@ -222,7 +222,7 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     qcr_due_date = subtract_business_days(contractor_due_date, QCR_DAYS_BEFORE_DUE)
     
     # Calculate Initial Reviewer due date
-    # QCR needs QCR_REVIEW_DAYS (3) days to review, so reviewer must submit 3 days before QCR due
+    # QCR needs QCR_REVIEW_DAYS (2) business days to review, so reviewer must submit 2 days before QCR due
     initial_reviewer_due_date = subtract_business_days(qcr_due_date, QCR_REVIEW_DAYS)
     
     # Ensure reviewer due date is not before date_received
@@ -1993,6 +1993,28 @@ def init_db():
         )
     ''')
     
+    # Reminder tracking table - tracks which reminders have been sent
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reminder_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            reminder_type TEXT NOT NULL,
+            recipient_email TEXT NOT NULL,
+            recipient_role TEXT NOT NULL,
+            due_date DATE NOT NULL,
+            reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue')),
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+            UNIQUE(item_id, recipient_email, recipient_role, reminder_stage)
+        )
+    ''')
+    
+    # Add item_reviewer_id column to reminder_log for multi-reviewer tracking
+    try:
+        cursor.execute('ALTER TABLE reminder_log ADD COLUMN item_reviewer_id INTEGER')
+    except:
+        pass
+    
     # Create default admin user if no users exist
     cursor.execute('SELECT COUNT(*) FROM user')
     if cursor.fetchone()[0] == 0:
@@ -3253,6 +3275,869 @@ class FolderResponseWatcher:
 
 # Global watcher instance
 folder_watcher = FolderResponseWatcher(interval_seconds=30)
+
+# =============================================================================
+# REMINDER EMAIL SYSTEM
+# =============================================================================
+
+# PST timezone offset (UTC-8, or UTC-7 during DST)
+# For simplicity, we'll use 8 AM PST = 16:00 UTC (or 15:00 UTC during DST)
+REMINDER_HOUR_PST = 8  # 8 AM PST
+
+def get_pst_now():
+    """Get current time in PST (approximate, using UTC-8)."""
+    utc_now = datetime.utcnow()
+    pst_offset = timedelta(hours=-8)
+    return utc_now + pst_offset
+
+def is_past_reminder_time_today():
+    """Check if we're past the reminder time (8 AM PST) today."""
+    pst_now = get_pst_now()
+    return pst_now.hour >= REMINDER_HOUR_PST
+
+def has_reminder_been_sent(item_id, recipient_email, recipient_role, reminder_stage, item_reviewer_id=None):
+    """Check if a specific reminder has already been sent."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    if item_reviewer_id:
+        cursor.execute('''
+            SELECT id FROM reminder_log 
+            WHERE item_id = ? AND recipient_email = ? AND recipient_role = ? AND reminder_stage = ? AND item_reviewer_id = ?
+        ''', (item_id, recipient_email, recipient_role, reminder_stage, item_reviewer_id))
+    else:
+        cursor.execute('''
+            SELECT id FROM reminder_log 
+            WHERE item_id = ? AND recipient_email = ? AND recipient_role = ? AND reminder_stage = ?
+        ''', (item_id, recipient_email, recipient_role, reminder_stage))
+    
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+def record_reminder_sent(item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, item_reviewer_id=None):
+    """Record that a reminder has been sent."""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR IGNORE INTO reminder_log (item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, item_reviewer_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, item_reviewer_id))
+        conn.commit()
+    except Exception as e:
+        print(f"  [Reminder] Error recording reminder: {e}")
+    finally:
+        conn.close()
+
+def check_response_exists_local(item_id, role, reviewer_name=None):
+    """Check if a response file exists for an item in local mode.
+    
+    Args:
+        item_id: The item ID
+        role: 'reviewer' or 'qcr'
+        reviewer_name: For multi-reviewer mode, the reviewer's name
+    
+    Returns True if response exists, False otherwise.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT folder_link, multi_reviewer_mode FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    conn.close()
+    
+    if not item or not item['folder_link']:
+        return False
+    
+    folder_path = Path(item['folder_link'])
+    responses_folder = folder_path / 'Responses'
+    
+    if not responses_folder.exists():
+        return False
+    
+    if item['multi_reviewer_mode']:
+        if role == 'reviewer' and reviewer_name:
+            # Check for multi-reviewer response file
+            safe_name = re.sub(r'[^a-zA-Z0-9]', '_', reviewer_name)
+            response_file = responses_folder / f'_multi_reviewer_response_{safe_name}.json'
+            # Also check for processed versions
+            processed_file = responses_folder / f'_processed__multi_reviewer_response_{safe_name}.json'
+            return response_file.exists() or processed_file.exists()
+        elif role == 'qcr':
+            response_file = responses_folder / '_multi_reviewer_qcr_response.json'
+            processed_file = responses_folder / '_processed__multi_reviewer_qcr_response.json'
+            return response_file.exists() or processed_file.exists()
+    else:
+        # Single reviewer mode
+        if role == 'reviewer':
+            response_file = responses_folder / '_reviewer_response.json'
+            processed_file = responses_folder / '_processed__reviewer_response.json'
+            return response_file.exists() or processed_file.exists()
+        elif role == 'qcr':
+            response_file = responses_folder / '_qcr_response.json'
+            processed_file = responses_folder / '_processed__qcr_response.json'
+            return response_file.exists() or processed_file.exists()
+    
+    return False
+
+def get_items_needing_reminders():
+    """Get all items that need reminder emails today.
+    
+    Returns dict with:
+        - single_reviewer_items: Items where reviewer or QCR needs reminder
+        - multi_reviewer_items: Multi-reviewer items with reviewers needing reminder
+    """
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    result = {
+        'single_reviewer': [],  # (item, role, due_date, reminder_stage)
+        'multi_reviewer': [],   # (item, reviewer_record, role, due_date, reminder_stage)
+        'multi_reviewer_qcr': [] # (item, due_date, reminder_stage)
+    }
+    
+    # =====================================================================
+    # SINGLE REVIEWER MODE
+    # =====================================================================
+    # Get items where reviewer hasn't responded and reviewer due date is today or yesterday
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.multi_reviewer_mode = 0 
+        AND i.status IN ('Assigned', 'In Review')
+        AND i.initial_reviewer_due_date IS NOT NULL
+        AND DATE(i.initial_reviewer_due_date) <= ?
+        AND i.reviewer_response_at IS NULL
+        AND i.reviewer_email_sent_at IS NOT NULL
+    ''', (today.strftime('%Y-%m-%d'),))
+    
+    for item in cursor.fetchall():
+        item = dict(item)
+        due_date = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+        
+        if due_date == today:
+            reminder_stage = 'due_today'
+        elif due_date < today:
+            # Only send overdue reminder on the day after (not every day after)
+            if due_date == yesterday:
+                reminder_stage = 'overdue'
+            else:
+                continue  # Don't send reminders for items overdue by more than 1 day
+        else:
+            continue  # Future due date
+        
+        # Check if response file exists in local mode
+        if is_local_mode() and check_response_exists_local(item['id'], 'reviewer'):
+            continue  # Response already exists
+        
+        if item['reviewer_email']:
+            result['single_reviewer'].append((item, 'reviewer', due_date, reminder_stage))
+    
+    # Get items where QCR hasn't responded and QCR due date is today or yesterday
+    # (Item must be in 'In QC' status, meaning reviewer has submitted)
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.multi_reviewer_mode = 0 
+        AND i.status = 'In QC'
+        AND i.qcr_due_date IS NOT NULL
+        AND DATE(i.qcr_due_date) <= ?
+        AND i.qcr_response_at IS NULL
+        AND i.qcr_email_sent_at IS NOT NULL
+    ''', (today.strftime('%Y-%m-%d'),))
+    
+    for item in cursor.fetchall():
+        item = dict(item)
+        due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+        
+        if due_date == today:
+            reminder_stage = 'due_today'
+        elif due_date < today:
+            if due_date == yesterday:
+                reminder_stage = 'overdue'
+            else:
+                continue
+        else:
+            continue
+        
+        # Check if response file exists in local mode
+        if is_local_mode() and check_response_exists_local(item['id'], 'qcr'):
+            continue
+        
+        if item['qcr_email']:
+            result['single_reviewer'].append((item, 'qcr', due_date, reminder_stage))
+    
+    # =====================================================================
+    # MULTI-REVIEWER MODE - Individual Reviewers
+    # =====================================================================
+    cursor.execute('''
+        SELECT i.*, 
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.multi_reviewer_mode = 1 
+        AND i.status IN ('Assigned', 'In Review')
+        AND i.initial_reviewer_due_date IS NOT NULL
+        AND DATE(i.initial_reviewer_due_date) <= ?
+    ''', (today.strftime('%Y-%m-%d'),))
+    
+    for item in cursor.fetchall():
+        item = dict(item)
+        due_date = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+        
+        if due_date == today:
+            reminder_stage = 'due_today'
+        elif due_date < today:
+            if due_date == yesterday:
+                reminder_stage = 'overdue'
+            else:
+                continue
+        else:
+            continue
+        
+        # Get individual reviewers who haven't responded
+        cursor.execute('''
+            SELECT * FROM item_reviewers 
+            WHERE item_id = ? 
+            AND response_at IS NULL 
+            AND email_sent_at IS NOT NULL
+            AND needs_response = 1
+        ''', (item['id'],))
+        
+        for reviewer in cursor.fetchall():
+            reviewer = dict(reviewer)
+            
+            # Check if response file exists in local mode
+            if is_local_mode() and check_response_exists_local(item['id'], 'reviewer', reviewer['reviewer_name']):
+                continue
+            
+            result['multi_reviewer'].append((item, reviewer, 'reviewer', due_date, reminder_stage))
+    
+    # =====================================================================
+    # MULTI-REVIEWER MODE - QCR
+    # =====================================================================
+    cursor.execute('''
+        SELECT i.*, 
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.multi_reviewer_mode = 1 
+        AND i.status = 'In QC'
+        AND i.qcr_due_date IS NOT NULL
+        AND DATE(i.qcr_due_date) <= ?
+        AND i.qcr_response_at IS NULL
+    ''', (today.strftime('%Y-%m-%d'),))
+    
+    for item in cursor.fetchall():
+        item = dict(item)
+        due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+        
+        if due_date == today:
+            reminder_stage = 'due_today'
+        elif due_date < today:
+            if due_date == yesterday:
+                reminder_stage = 'overdue'
+            else:
+                continue
+        else:
+            continue
+        
+        # Check if response file exists in local mode
+        if is_local_mode() and check_response_exists_local(item['id'], 'qcr'):
+            continue
+        
+        if item['qcr_email']:
+            result['multi_reviewer_qcr'].append((item, due_date, reminder_stage))
+    
+    conn.close()
+    return result
+
+def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
+    """Send a reminder email for single-reviewer mode.
+    
+    This re-sends the original assignment email but with a modified subject line.
+    Only emails the person whose turn it is (no CCs).
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    item_id = item['id']
+    
+    # Check if this reminder has already been sent
+    recipient_email = item['reviewer_email'] if role == 'reviewer' else item['qcr_email']
+    if has_reminder_been_sent(item_id, recipient_email, role, reminder_stage):
+        return {'success': True, 'skipped': True, 'reason': 'Already sent'}
+    
+    # Determine subject prefix
+    if reminder_stage == 'due_today':
+        subject_prefix = "REMINDER: DUE TODAY"
+    else:
+        subject_prefix = "REMINDER: OVERDUE"
+    
+    # Build subject line
+    subject = f"{subject_prefix} - [LEB] {item['identifier']}"
+    
+    # Priority color
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    # Folder link
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4; text-decoration:underline;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
+    # Determine if using file-based forms
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    if role == 'reviewer':
+        # Send reminder to reviewer
+        reviewer_due_date = item['initial_reviewer_due_date']
+        qcr_due_date = item['qcr_due_date']
+        
+        if use_file_form:
+            form_result = generate_reviewer_form_html(item_id)
+            if form_result['success']:
+                form_file_path = form_result['path']
+                form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+                
+                html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- REMINDER BANNER -->
+    <div style="background: {'#dc3545' if reminder_stage == 'overdue' else '#ffc107'}; color: {'white' if reminder_stage == 'overdue' else '#212529'}; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
+        <strong style="font-size: 16px;">{"⚠️ OVERDUE - RESPONSE REQUIRED IMMEDIATELY" if reminder_stage == 'overdue' else "⏰ REMINDER - DUE TODAY"}</strong>
+        <div style="margin-top: 8px; font-size: 14px;">Your response was due: {due_date.strftime('%B %d, %Y')}</div>
+    </div>
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} – Assigned to You
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        This is a reminder that you have been assigned a review task that requires your response.
+    </p>
+
+    <!-- DIRECT LINK TO FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#667eea" style="background:#667eea; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#667eea; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
+        <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+    </table>
+
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated reminder. Please submit your response as soon as possible.</em>
+    </p>
+</div>"""
+            else:
+                return {'success': False, 'error': f'Could not generate form: {form_result.get("error")}'}
+        else:
+            # Server-based form fallback
+            app_host = get_app_host()
+            token = item['email_token_reviewer']
+            review_url = f"{app_host}/respond/reviewer?token={token}"
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333;">
+                <h2>{subject_prefix} - {item['identifier']}</h2>
+                <p>Please submit your response: <a href="{review_url}">{review_url}</a></p>
+            </div>"""
+        
+        # Send via Outlook - NO CC
+        try:
+            pythoncom.CoInitialize()
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            mail.Subject = subject
+            mail.HTMLBody = html_body
+            mail.To = item['reviewer_email']
+            # NO CC for reminder emails
+            mail.Send()
+            
+            record_reminder_sent(item_id, 'single_reviewer', item['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage)
+            print(f"  [Reminder] Sent {reminder_stage} reminder to reviewer for item {item_id}")
+            return {'success': True}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+        finally:
+            pythoncom.CoUninitialize()
+    
+    else:  # role == 'qcr'
+        # Send reminder to QCR
+        qcr_due_date = item['qcr_due_date']
+        
+        if use_file_form:
+            form_result = generate_qcr_form_html(item_id)
+            if form_result['success']:
+                form_file_path = form_result['path']
+                form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+                
+                html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- REMINDER BANNER -->
+    <div style="background: {'#dc3545' if reminder_stage == 'overdue' else '#ffc107'}; color: {'white' if reminder_stage == 'overdue' else '#212529'}; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
+        <strong style="font-size: 16px;">{"⚠️ OVERDUE - QC REVIEW REQUIRED IMMEDIATELY" if reminder_stage == 'overdue' else "⏰ REMINDER - QC REVIEW DUE TODAY"}</strong>
+        <div style="margin-top: 8px; font-size: 14px;">Your QC review was due: {due_date.strftime('%B %d, %Y')}</div>
+    </div>
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} – Ready for Your Review
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        This is a reminder that a QC review is awaiting your action.
+    </p>
+
+    <!-- DIRECT LINK TO FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN QC REVIEW FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
+        <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+    </table>
+
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated reminder. Please complete your QC review as soon as possible.</em>
+    </p>
+</div>"""
+            else:
+                return {'success': False, 'error': f'Could not generate form: {form_result.get("error")}'}
+        else:
+            app_host = get_app_host()
+            token = item['email_token_qcr']
+            review_url = f"{app_host}/respond/qcr?token={token}"
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333;">
+                <h2>{subject_prefix} - {item['identifier']}</h2>
+                <p>Please complete your QC review: <a href="{review_url}">{review_url}</a></p>
+            </div>"""
+        
+        # Send via Outlook - NO CC
+        try:
+            pythoncom.CoInitialize()
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            mail = outlook.CreateItem(0)
+            mail.Subject = subject
+            mail.HTMLBody = html_body
+            mail.To = item['qcr_email']
+            # NO CC for reminder emails
+            mail.Send()
+            
+            record_reminder_sent(item_id, 'single_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
+            print(f"  [Reminder] Sent {reminder_stage} reminder to QCR for item {item_id}")
+            return {'success': True}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+        finally:
+            pythoncom.CoUninitialize()
+
+def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_stage):
+    """Send a reminder email for a specific reviewer in multi-reviewer mode."""
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    item_id = item['id']
+    
+    # Check if this reminder has already been sent
+    if has_reminder_been_sent(item_id, reviewer['reviewer_email'], role, reminder_stage, reviewer['id']):
+        return {'success': True, 'skipped': True, 'reason': 'Already sent'}
+    
+    # Determine subject prefix
+    if reminder_stage == 'due_today':
+        subject_prefix = "REMINDER: DUE TODAY"
+    else:
+        subject_prefix = "REMINDER: OVERDUE"
+    
+    subject = f"{subject_prefix} - [LEB] {item['identifier']}"
+    
+    # Priority color
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    # Folder link
+    folder_path = item['folder_link'] or 'Not set'
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    reviewer_due_date = item['initial_reviewer_due_date']
+    qcr_due_date = item['qcr_due_date']
+    
+    if use_file_form:
+        form_result = generate_multi_reviewer_form(item_id, reviewer)
+        if form_result['success']:
+            form_file_path = form_result['path']
+            form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+            
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- REMINDER BANNER -->
+    <div style="background: {'#dc3545' if reminder_stage == 'overdue' else '#ffc107'}; color: {'white' if reminder_stage == 'overdue' else '#212529'}; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
+        <strong style="font-size: 16px;">{"⚠️ OVERDUE - RESPONSE REQUIRED IMMEDIATELY" if reminder_stage == 'overdue' else "⏰ REMINDER - DUE TODAY"}</strong>
+        <div style="margin-top: 8px; font-size: 14px;">Your response was due: {due_date.strftime('%B %d, %Y')}</div>
+    </div>
+
+    <!-- BLUEBEAM INSTRUCTIONS -->
+    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
+            <strong>Provide markups in the corresponding Bluebeam session.</strong>
+        </div>
+    </div>
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} – Assigned to You
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        This is a reminder that you have been assigned a review task that requires your response.
+    </p>
+
+    <!-- DIRECT LINK TO FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
+        <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+    </table>
+
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated reminder. Please submit your response as soon as possible.</em>
+    </p>
+</div>"""
+        else:
+            return {'success': False, 'error': f'Could not generate form: {form_result.get("error")}'}
+    else:
+        app_host = get_app_host()
+        token = reviewer['email_token']
+        review_url = f"{app_host}/respond/multi-reviewer?token={token}"
+        html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333;">
+            <h2>{subject_prefix} - {item['identifier']}</h2>
+            <p>Please submit your response: <a href="{review_url}">{review_url}</a></p>
+        </div>"""
+    
+    # Send via Outlook - Only to this specific reviewer, NO CC
+    try:
+        pythoncom.CoInitialize()
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)
+        mail.Subject = subject
+        mail.HTMLBody = html_body
+        mail.To = reviewer['reviewer_email']
+        # NO CC for reminder emails
+        mail.Send()
+        
+        record_reminder_sent(item_id, 'multi_reviewer', reviewer['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage, reviewer['id'])
+        print(f"  [Reminder] Sent {reminder_stage} reminder to {reviewer['reviewer_name']} for item {item_id}")
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        pythoncom.CoUninitialize()
+
+def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
+    """Send a reminder email to QCR in multi-reviewer mode."""
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    item_id = item['id']
+    
+    # Check if this reminder has already been sent
+    if has_reminder_been_sent(item_id, item['qcr_email'], 'qcr', reminder_stage):
+        return {'success': True, 'skipped': True, 'reason': 'Already sent'}
+    
+    # Determine subject prefix
+    if reminder_stage == 'due_today':
+        subject_prefix = "REMINDER: DUE TODAY"
+    else:
+        subject_prefix = "REMINDER: OVERDUE"
+    
+    subject = f"{subject_prefix} - [LEB] {item['identifier']}"
+    
+    # Priority color
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    # Folder link
+    folder_path = item['folder_link'] or 'Not set'
+    use_file_form = is_local_mode() and folder_path != 'Not set'
+    
+    qcr_due_date = item['qcr_due_date']
+    
+    if use_file_form:
+        form_result = generate_multi_reviewer_qcr_form(item_id)
+        if form_result['success']:
+            form_file_path = form_result['path']
+            form_file_link = f'file:///{form_file_path.replace(chr(92), "/")}'
+            
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- REMINDER BANNER -->
+    <div style="background: {'#dc3545' if reminder_stage == 'overdue' else '#ffc107'}; color: {'white' if reminder_stage == 'overdue' else '#212529'}; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
+        <strong style="font-size: 16px;">{"⚠️ OVERDUE - QC REVIEW REQUIRED IMMEDIATELY" if reminder_stage == 'overdue' else "⏰ REMINDER - QC REVIEW DUE TODAY"}</strong>
+        <div style="margin-top: 8px; font-size: 14px;">Your QC review was due: {due_date.strftime('%B %d, %Y')}</div>
+    </div>
+
+    <!-- HEADER -->
+    <h2 style="color:#444; margin-bottom:6px;">
+        [LEB] {item['identifier']} – QC Review Ready
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        This is a reminder that all reviewers have submitted and QC review is required.
+    </p>
+
+    <!-- DIRECT LINK TO FORM -->
+    <div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#27ae60" style="background:#27ae60; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#27ae60; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:320px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN QC REVIEW FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
+        <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
+        <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+    </table>
+
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated reminder. Please complete your QC review as soon as possible.</em>
+    </p>
+</div>"""
+        else:
+            return {'success': False, 'error': f'Could not generate form: {form_result.get("error")}'}
+    else:
+        app_host = get_app_host()
+        token = item['email_token_qcr']
+        review_url = f"{app_host}/respond/multi-qcr?token={token}"
+        html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333;">
+            <h2>{subject_prefix} - {item['identifier']}</h2>
+            <p>Please complete your QC review: <a href="{review_url}">{review_url}</a></p>
+        </div>"""
+    
+    # Send via Outlook - NO CC
+    try:
+        pythoncom.CoInitialize()
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)
+        mail.Subject = subject
+        mail.HTMLBody = html_body
+        mail.To = item['qcr_email']
+        # NO CC for reminder emails
+        mail.Send()
+        
+        record_reminder_sent(item_id, 'multi_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
+        print(f"  [Reminder] Sent {reminder_stage} reminder to QCR for item {item_id}")
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        pythoncom.CoUninitialize()
+
+def process_all_reminders():
+    """Process all due/overdue reminders. Called by the reminder scheduler."""
+    if not is_past_reminder_time_today():
+        return {'processed': False, 'reason': 'Not yet reminder time (8 AM PST)'}
+    
+    print(f"  [Reminder] Processing reminders at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    items_needing_reminders = get_items_needing_reminders()
+    
+    results = {
+        'single_reviewer_sent': 0,
+        'single_reviewer_skipped': 0,
+        'multi_reviewer_sent': 0,
+        'multi_reviewer_skipped': 0,
+        'multi_reviewer_qcr_sent': 0,
+        'multi_reviewer_qcr_skipped': 0,
+        'errors': []
+    }
+    
+    # Process single reviewer reminders
+    for item, role, due_date, reminder_stage in items_needing_reminders['single_reviewer']:
+        try:
+            result = send_single_reviewer_reminder_email(item, role, due_date, reminder_stage)
+            if result.get('success'):
+                if result.get('skipped'):
+                    results['single_reviewer_skipped'] += 1
+                else:
+                    results['single_reviewer_sent'] += 1
+            else:
+                results['errors'].append(f"Item {item['id']} ({role}): {result.get('error')}")
+        except Exception as e:
+            results['errors'].append(f"Item {item['id']} ({role}): {str(e)}")
+    
+    # Process multi-reviewer individual reminders
+    for item, reviewer, role, due_date, reminder_stage in items_needing_reminders['multi_reviewer']:
+        try:
+            result = send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_stage)
+            if result.get('success'):
+                if result.get('skipped'):
+                    results['multi_reviewer_skipped'] += 1
+                else:
+                    results['multi_reviewer_sent'] += 1
+            else:
+                results['errors'].append(f"Item {item['id']} ({reviewer['reviewer_name']}): {result.get('error')}")
+        except Exception as e:
+            results['errors'].append(f"Item {item['id']} ({reviewer['reviewer_name']}): {str(e)}")
+    
+    # Process multi-reviewer QCR reminders
+    for item, due_date, reminder_stage in items_needing_reminders['multi_reviewer_qcr']:
+        try:
+            result = send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage)
+            if result.get('success'):
+                if result.get('skipped'):
+                    results['multi_reviewer_qcr_skipped'] += 1
+                else:
+                    results['multi_reviewer_qcr_sent'] += 1
+            else:
+                results['errors'].append(f"Item {item['id']} (QCR): {result.get('error')}")
+        except Exception as e:
+            results['errors'].append(f"Item {item['id']} (QCR): {str(e)}")
+    
+    total_sent = results['single_reviewer_sent'] + results['multi_reviewer_sent'] + results['multi_reviewer_qcr_sent']
+    if total_sent > 0:
+        print(f"  [Reminder] Sent {total_sent} reminder(s)")
+    
+    return results
+
+
+class ReminderScheduler:
+    """Background scheduler for sending reminder emails at 8 AM PST."""
+    
+    def __init__(self, check_interval_seconds=300):  # Check every 5 minutes
+        self.running = False
+        self.thread = None
+        self.interval = check_interval_seconds
+        self.last_check = None
+        self.last_reminder_date = None  # Track when we last processed reminders for the day
+    
+    def start(self):
+        """Start the reminder scheduler thread."""
+        self.running = True
+        self.thread = threading.Thread(target=self._scheduler_loop, daemon=True)
+        self.thread.start()
+        print(f"Reminder scheduler started (checking every {self.interval}s)")
+    
+    def stop(self):
+        """Stop the reminder scheduler thread."""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+        print("Reminder scheduler stopped")
+    
+    def _scheduler_loop(self):
+        """Main scheduler loop."""
+        while self.running:
+            try:
+                self.last_check = datetime.now()
+                pst_now = get_pst_now()
+                today_pst = pst_now.date()
+                
+                # Only process reminders once per day, after 8 AM PST
+                if is_past_reminder_time_today():
+                    if self.last_reminder_date != today_pst:
+                        # Process reminders for today
+                        results = process_all_reminders()
+                        self.last_reminder_date = today_pst
+                        
+                        if results.get('errors'):
+                            for err in results['errors']:
+                                print(f"  [Reminder] Error: {err}")
+                
+            except Exception as e:
+                print(f"  [Reminder] Scheduler error: {e}")
+            
+            # Sleep in small increments so we can stop quickly
+            for _ in range(self.interval):
+                if not self.running:
+                    break
+                time.sleep(1)
+
+
+# Global reminder scheduler instance
+reminder_scheduler = ReminderScheduler(check_interval_seconds=300)
 
 # =============================================================================
 # OUTLOOK EMAIL POLLING
@@ -8584,6 +9469,15 @@ def api_get_notifications():
     """Get all notifications."""
     conn = get_db()
     cursor = conn.cursor()
+    
+    # Clean up response_ready notifications for items that are now closed
+    cursor.execute('''
+        DELETE FROM notification 
+        WHERE type = 'response_ready' 
+        AND item_id IN (SELECT id FROM item WHERE status = 'Closed')
+    ''')
+    conn.commit()
+    
     cursor.execute('''
         SELECT n.*, i.type as item_type, i.identifier as item_identifier
         FROM notification n
@@ -8649,16 +9543,15 @@ def api_mark_item_complete(item_id):
             closed_at = ?
         WHERE id = ?
     ''', (datetime.now().isoformat(), item_id))
+    
+    # Delete any response_ready notifications for this item since it's now closed
+    cursor.execute('''
+        DELETE FROM notification 
+        WHERE item_id = ? AND type = 'response_ready'
+    ''', (item_id,))
+    
     conn.commit()
     conn.close()
-    
-    # Create notification
-    create_notification(
-        'item_closed',
-        f'Item marked as complete',
-        f'The item has been marked as complete and closed.',
-        item_id=item_id
-    )
     
     return jsonify({'success': True, 'message': 'Item marked as complete'})
 
@@ -8721,6 +9614,79 @@ def api_watcher_status():
         'scan_count': folder_watcher.scan_count,
         'interval_seconds': folder_watcher.interval
     })
+
+
+@app.route('/api/reminder-status', methods=['GET'])
+@login_required
+def api_reminder_status():
+    """Get the status of the reminder scheduler."""
+    return jsonify({
+        'running': reminder_scheduler.running,
+        'last_check': reminder_scheduler.last_check.isoformat() if reminder_scheduler.last_check else None,
+        'last_reminder_date': reminder_scheduler.last_reminder_date.isoformat() if reminder_scheduler.last_reminder_date else None,
+        'check_interval_seconds': reminder_scheduler.interval,
+        'reminder_time_pst': f"{REMINDER_HOUR_PST}:00 AM PST",
+        'is_past_reminder_time': is_past_reminder_time_today()
+    })
+
+
+@app.route('/api/process-reminders', methods=['POST'])
+@admin_required
+def api_process_reminders():
+    """Manually trigger reminder processing."""
+    try:
+        results = process_all_reminders()
+        return jsonify({
+            'success': True,
+            'results': results
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/pending-reminders', methods=['GET'])
+@login_required
+def api_pending_reminders():
+    """Get list of items that would receive reminders today."""
+    try:
+        items = get_items_needing_reminders()
+        return jsonify({
+            'success': True,
+            'single_reviewer': [
+                {
+                    'item_id': item['id'],
+                    'identifier': item['identifier'],
+                    'role': role,
+                    'due_date': due_date.strftime('%Y-%m-%d'),
+                    'reminder_stage': stage,
+                    'recipient': item['reviewer_email'] if role == 'reviewer' else item['qcr_email']
+                }
+                for item, role, due_date, stage in items['single_reviewer']
+            ],
+            'multi_reviewer': [
+                {
+                    'item_id': item['id'],
+                    'identifier': item['identifier'],
+                    'reviewer_name': reviewer['reviewer_name'],
+                    'reviewer_email': reviewer['reviewer_email'],
+                    'due_date': due_date.strftime('%Y-%m-%d'),
+                    'reminder_stage': stage
+                }
+                for item, reviewer, role, due_date, stage in items['multi_reviewer']
+            ],
+            'multi_reviewer_qcr': [
+                {
+                    'item_id': item['id'],
+                    'identifier': item['identifier'],
+                    'qcr_email': item['qcr_email'],
+                    'due_date': due_date.strftime('%Y-%m-%d'),
+                    'reminder_stage': stage
+                }
+                for item, due_date, stage in items['multi_reviewer_qcr']
+            ]
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
 # STATIC FILE ROUTES
@@ -8796,6 +9762,24 @@ def main():
     print("Starting folder response watcher...")
     folder_watcher.start()
     
+    # Start reminder scheduler
+    print("Starting reminder scheduler...")
+    reminder_scheduler.start()
+    
+    # Process any pending reminders on startup (in case server was off at 8 AM)
+    print("Checking for pending reminders...")
+    try:
+        results = process_all_reminders()
+        total_sent = results.get('single_reviewer_sent', 0) + results.get('multi_reviewer_sent', 0) + results.get('multi_reviewer_qcr_sent', 0)
+        if total_sent > 0:
+            print(f"  Sent {total_sent} pending reminder(s)")
+        elif results.get('processed') == False:
+            print(f"  {results.get('reason', 'No reminders needed')}")
+        else:
+            print("  No reminders needed")
+    except Exception as e:
+        print(f"  Reminder check error: {e}")
+    
     # Start web server
     port = CONFIG.get('server_port', 5000)
     print(f"\nStarting web server on http://localhost:{port}")
@@ -8808,6 +9792,7 @@ def main():
         print("\nShutting down...")
         email_poller.stop()
         folder_watcher.stop()
+        reminder_scheduler.stop()
 
 if __name__ == '__main__':
     main()

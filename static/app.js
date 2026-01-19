@@ -1301,11 +1301,11 @@ function renderNotifications(notifications) {
         if (n.item_id) {
             actionsHtml += `<button class="btn btn-outline btn-sm" onclick="viewNotificationItem(${n.item_id}, ${n.id})">👁️ View Item</button>`;
         }
-        if (n.action_url && n.action_label) {
-            actionsHtml = `<button class="btn btn-primary btn-sm" onclick="handleNotificationAction(${n.id}, '${n.action_url}')">${n.action_label}</button>` + actionsHtml;
-        }
+        // For response_ready with action_url, use markItemComplete instead of handleNotificationAction
         if (n.type === 'response_ready' && n.item_id) {
-            actionsHtml += `<button class="btn btn-success btn-sm" onclick="markItemComplete(${n.item_id}, ${n.id})">✓ Mark Complete</button>`;
+            actionsHtml = `<button class="btn btn-success btn-sm" onclick="markItemComplete(${n.item_id}, ${n.id})">✓ Mark Complete</button>` + actionsHtml;
+        } else if (n.action_url && n.action_label) {
+            actionsHtml = `<button class="btn btn-primary btn-sm" onclick="handleNotificationAction(${n.id}, '${n.action_url}')">${n.action_label}</button>` + actionsHtml;
         }
         if (isUnread) {
             actionsHtml += `<button class="btn btn-secondary btn-sm" onclick="markNotificationRead(${n.id})">Mark Read</button>`;
@@ -1408,12 +1408,22 @@ async function deleteNotification(id) {
 /**
  * Handle notification action button click
  */
-function handleNotificationAction(notificationId, actionUrl) {
+async function handleNotificationAction(notificationId, actionUrl) {
     // Mark as read first
-    markNotificationRead(notificationId);
+    await markNotificationRead(notificationId);
     
-    // Navigate to the action URL or open drawer
-    if (actionUrl.startsWith('/')) {
+    // If it's an API URL, make a POST call; otherwise navigate
+    if (actionUrl.startsWith('/api/')) {
+        try {
+            await api(actionUrl.replace('/api', ''), { method: 'POST' });
+            showToast('Action completed successfully', 'success');
+            loadNotifications();
+            loadItems();
+        } catch (err) {
+            console.error('Failed to perform action:', err);
+            showToast('Failed to perform action', 'error');
+        }
+    } else if (actionUrl.startsWith('/')) {
         window.location.href = actionUrl;
     }
 }
@@ -1962,15 +1972,18 @@ async function deleteSelectedItems() {
         }
     }
     
-    // Exit selection mode and refresh
+    // Exit selection mode first
     cancelSelectMode();
+    
+    // Refresh the data
     await loadItems();
     await loadStats();
     
+    // Show result message using toast instead of blocking alert
     if (errorCount > 0) {
-        alert(`Deleted ${successCount} item(s). ${errorCount} failed.`);
+        showToast(`Deleted ${successCount} item(s). ${errorCount} failed.`, 'warning');
     } else {
-        alert(`Successfully deleted ${successCount} item(s).`);
+        showToast(`Successfully deleted ${successCount} item(s).`, 'success');
     }
 }
 
