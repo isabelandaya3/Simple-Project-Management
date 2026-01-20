@@ -1344,6 +1344,212 @@ function getNotificationIcon(type) {
     return icons[type] || '🔔';
 }
 
+// =============================================================================
+// REMINDERS VIEW
+// =============================================================================
+
+/**
+ * Switch to reminders view
+ */
+function switchToReminders() {
+    state.currentView = 'reminders';
+    
+    // Update nav active state
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === 'reminders');
+    });
+    
+    // Show reminders container, hide other containers
+    hide('table-container');
+    hide('workflow-container');
+    hide('notifications-container');
+    show('reminders-container');
+    
+    // Update header
+    document.getElementById('page-title').textContent = 'Reminders';
+    document.getElementById('page-subtitle').textContent = 'Reminder Management';
+    
+    loadRemindersView();
+}
+
+/**
+ * Load reminders view data
+ */
+async function loadRemindersView() {
+    await Promise.all([
+        loadReminderStatus(),
+        loadPendingReminders(),
+        loadReminderHistory()
+    ]);
+}
+
+/**
+ * Load reminder scheduler status
+ */
+async function loadReminderStatus() {
+    try {
+        const status = await api('/reminder-status');
+        document.getElementById('reminder-scheduler-status').textContent = status.running ? '🟢 Running' : '🔴 Stopped';
+        document.getElementById('reminder-scheduler-status').style.color = status.running ? '#059669' : '#dc2626';
+        document.getElementById('reminder-time').textContent = status.reminder_time_pst;
+        document.getElementById('reminder-last-check').textContent = status.last_check ? formatDateTime(status.last_check) : 'Never';
+    } catch (err) {
+        console.error('Failed to load reminder status:', err);
+    }
+}
+
+/**
+ * Load pending reminders
+ */
+async function loadPendingReminders() {
+    try {
+        const data = await api('/pending-reminders');
+        renderPendingReminders(data);
+    } catch (err) {
+        console.error('Failed to load pending reminders:', err);
+        document.getElementById('pending-reminders-list').innerHTML = '<p class="text-muted">Failed to load pending reminders</p>';
+    }
+}
+
+/**
+ * Render pending reminders
+ */
+function renderPendingReminders(data) {
+    const container = document.getElementById('pending-reminders-list');
+    
+    const allPending = [
+        ...data.single_reviewer.map(r => ({ ...r, mode: 'single', displayName: r.recipient })),
+        ...data.multi_reviewer.map(r => ({ ...r, mode: 'multi', displayName: r.reviewer_name })),
+        ...data.multi_reviewer_qcr.map(r => ({ ...r, mode: 'multi_qcr', displayName: r.qcr_email, role: 'qcr' }))
+    ];
+    
+    if (allPending.length === 0) {
+        container.innerHTML = '<div class="empty-reminder-state"><p>✅ No pending reminders at this time</p></div>';
+        return;
+    }
+    
+    container.innerHTML = allPending.map(r => {
+        const stageClass = r.reminder_stage === 'overdue' ? 'overdue' : 'due-today';
+        const stageLabel = r.reminder_stage === 'overdue' ? '⚠️ OVERDUE' : '⏰ Due Today';
+        const roleLabel = r.role === 'qcr' ? 'QCR' : 'Reviewer';
+        
+        return `
+            <div class="pending-reminder-item ${stageClass}">
+                <div class="reminder-item-info">
+                    <div class="reminder-identifier">${r.identifier}</div>
+                    <div class="reminder-recipient">${roleLabel}: ${r.displayName}</div>
+                    <div class="reminder-due">Due: ${r.due_date}</div>
+                </div>
+                <div class="reminder-item-status">
+                    <span class="reminder-stage ${stageClass}">${stageLabel}</span>
+                </div>
+                <div class="reminder-item-actions">
+                    <button class="btn btn-primary btn-sm" onclick="sendItemReminder(${r.item_id})">📧 Send Reminder</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Load reminder history
+ */
+async function loadReminderHistory() {
+    try {
+        const data = await api('/reminder-history');
+        renderReminderHistory(data.reminders);
+    } catch (err) {
+        console.error('Failed to load reminder history:', err);
+        document.getElementById('reminder-history-list').innerHTML = '<p class="text-muted">Failed to load reminder history</p>';
+    }
+}
+
+/**
+ * Render reminder history
+ */
+function renderReminderHistory(reminders) {
+    const container = document.getElementById('reminder-history-list');
+    
+    if (!reminders || reminders.length === 0) {
+        container.innerHTML = '<div class="empty-reminder-state"><p>No reminders have been sent yet</p></div>';
+        return;
+    }
+    
+    container.innerHTML = reminders.map(r => {
+        const stageClass = r.reminder_stage === 'overdue' ? 'overdue' : r.reminder_stage === 'due_today' ? 'due-today' : 'manual';
+        const stageLabel = r.reminder_stage === 'overdue' ? '⚠️ Overdue' : r.reminder_stage === 'due_today' ? '⏰ Due Today' : '✋ Manual';
+        const roleLabel = r.role === 'qcr' ? 'QCR' : 'Reviewer';
+        
+        return `
+            <div class="reminder-history-item">
+                <div class="history-item-info">
+                    <div class="history-identifier">${r.identifier || `Item #${r.item_id}`}</div>
+                    <div class="history-recipient">${roleLabel}: ${r.recipient_email}</div>
+                    <div class="history-sent">Sent: ${formatDateTime(r.sent_at)}</div>
+                </div>
+                <div class="history-item-meta">
+                    <span class="reminder-stage ${stageClass}">${stageLabel}</span>
+                    <span class="reminder-mode">${r.reminder_type}</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Send reminder for a specific item
+ */
+async function sendItemReminder(itemId) {
+    if (!confirm('Send reminder for this item?')) return;
+    
+    try {
+        const result = await api(`/items/${itemId}/send-reminder`, { method: 'POST' });
+        if (result.success) {
+            const successCount = result.results.filter(r => r.success).length;
+            showToast(`Sent ${successCount} reminder(s)`, 'success');
+            if (state.currentView === 'reminders') {
+                loadRemindersView();
+            }
+        } else {
+            showToast(result.error || 'Failed to send reminder', 'error');
+        }
+    } catch (err) {
+        console.error('Failed to send reminder:', err);
+        showToast('Failed to send reminder', 'error');
+    }
+}
+
+/**
+ * Handle send reminder button in drawer
+ */
+async function handleSendReminderFromDrawer() {
+    if (!state.selectedItemId) {
+        showToast('No item selected', 'error');
+        return;
+    }
+    await sendItemReminder(state.selectedItemId);
+}
+
+/**
+ * Process all pending reminders
+ */
+async function processAllReminders() {
+    if (!confirm('Send all pending reminders now?')) return;
+    
+    try {
+        const result = await api('/process-reminders', { method: 'POST' });
+        if (result.success) {
+            showToast('Reminders processed successfully', 'success');
+            loadRemindersView();
+        } else {
+            showToast(result.error || 'Failed to process reminders', 'error');
+        }
+    } catch (err) {
+        console.error('Failed to process reminders:', err);
+        showToast('Failed to process reminders', 'error');
+    }
+}
+
 /**
  * Format time ago string
  */
@@ -2365,6 +2571,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 switchToWorkflow();
             } else if (tab.dataset.view === 'notifications') {
                 switchToNotifications();
+            } else if (tab.dataset.view === 'reminders') {
+                switchToReminders();
             } else if (tab.dataset.bucket) {
                 switchToItems(tab.dataset.bucket);
             }
@@ -2432,6 +2640,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Send to Reviewer button
     document.getElementById('btn-send-to-reviewer').addEventListener('click', handleSendToReviewer);
     
+    // Send Reminder button in drawer
+    document.getElementById('btn-send-reminder').addEventListener('click', handleSendReminderFromDrawer);
+    
     // New item modal
     document.getElementById('btn-new-item').addEventListener('click', openNewItemModal);
     document.getElementById('btn-close-new-item').addEventListener('click', closeNewItemModal);
@@ -2452,6 +2663,16 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
     document.getElementById('btn-close-settings').addEventListener('click', closeSettingsModal);
     document.getElementById('settings-form').addEventListener('submit', handleSaveSettings);
+    
+    // Reminder buttons
+    const processRemindersBtn = document.getElementById('btn-process-reminders');
+    if (processRemindersBtn) {
+        processRemindersBtn.addEventListener('click', processAllReminders);
+    }
+    const refreshRemindersBtn = document.getElementById('btn-refresh-reminders');
+    if (refreshRemindersBtn) {
+        refreshRemindersBtn.addEventListener('click', loadRemindersView);
+    }
     
     // User menu
     document.getElementById('user-avatar').addEventListener('click', () => {

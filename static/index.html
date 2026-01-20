@@ -85,6 +85,10 @@
                         <span class="nav-tab-label">Notifications</span>
                         <span class="nav-tab-count notification-badge" id="count-notifications">0</span>
                     </button>
+                    <button class="nav-tab" data-view="reminders">
+                        <span class="nav-tab-icon">⏰</span>
+                        <span class="nav-tab-label">Reminders</span>
+                    </button>
                     <div class="nav-divider"></div>
                     <button class="nav-tab active" data-bucket="ALL">
                         <span class="nav-tab-icon">📁</span>
@@ -265,6 +269,52 @@
                     <p>You're all caught up! Notifications will appear here when there are updates.</p>
                 </div>
             </div>
+
+            <!-- Reminders View -->
+            <div class="reminders-container hidden" id="reminders-container">
+                <div class="reminders-header">
+                    <h2>⏰ Reminder Management</h2>
+                    <p>Track and send reminders for pending reviews</p>
+                    <div class="reminders-actions">
+                        <button class="btn btn-primary btn-sm" id="btn-process-reminders">Send All Pending Reminders</button>
+                        <button class="btn btn-secondary btn-sm" id="btn-refresh-reminders">Refresh</button>
+                    </div>
+                </div>
+                
+                <!-- Reminder Status -->
+                <div class="reminder-status-card" id="reminder-status-card">
+                    <div class="status-row">
+                        <span class="status-label">Scheduler Status:</span>
+                        <span class="status-value" id="reminder-scheduler-status">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Reminder Time:</span>
+                        <span class="status-value" id="reminder-time">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Last Check:</span>
+                        <span class="status-value" id="reminder-last-check">--</span>
+                    </div>
+                </div>
+                
+                <!-- Pending Reminders Section -->
+                <div class="reminder-section">
+                    <h3>📨 Pending Reminders</h3>
+                    <p class="section-description">Items that need reminders sent today</p>
+                    <div class="pending-reminders-list" id="pending-reminders-list">
+                        <!-- Pending reminders will be loaded here -->
+                    </div>
+                </div>
+                
+                <!-- Reminder History Section -->
+                <div class="reminder-section">
+                    <h3>📜 Reminder History</h3>
+                    <p class="section-description">Recently sent reminders</p>
+                    <div class="reminder-history-list" id="reminder-history-list">
+                        <!-- Reminder history will be loaded here -->
+                    </div>
+                </div>
+            </div>
         </main>
 
         <!-- Detail Drawer -->
@@ -412,6 +462,9 @@
                         <div class="workflow-actions" id="workflow-actions">
                             <button class="btn btn-success" id="btn-send-to-reviewer">
                                 📧 Send to Reviewer
+                            </button>
+                            <button class="btn btn-warning btn-sm" id="btn-send-reminder" title="Send reminder email">
+                                ⏰ Send Reminder
                             </button>
                             <div class="workflow-status hidden" id="workflow-status-info">
                                 <p id="workflow-status-text"></p>

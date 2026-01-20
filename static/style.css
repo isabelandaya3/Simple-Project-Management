@@ -2756,3 +2756,227 @@ tr.insufficient-warning:hover {
     color: var(--text-muted);
     font-size: 0.8125rem;
 }
+
+/* =============================================================================
+   Reminders View
+   ============================================================================= */
+
+.reminders-container {
+    padding: 1.5rem;
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.reminders-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.reminders-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+}
+
+.reminders-header p {
+    flex: 1;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.reminders-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.reminder-status-card {
+    background: var(--bg-tertiary);
+    border-radius: var(--border-radius);
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+}
+
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.status-label {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.status-value {
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.reminder-section {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.reminder-section h3 {
+    margin: 0 0 0.25rem 0;
+    font-size: 1.125rem;
+}
+
+.section-description {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    margin: 0 0 1rem 0;
+}
+
+.pending-reminders-list,
+.reminder-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.pending-reminder-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    transition: all var(--transition);
+}
+
+.pending-reminder-item:hover {
+    box-shadow: var(--shadow-sm);
+}
+
+.pending-reminder-item.overdue {
+    border-left: 3px solid var(--color-danger);
+    background: rgba(255, 59, 48, 0.05);
+}
+
+.pending-reminder-item.due-today {
+    border-left: 3px solid var(--color-warning);
+    background: rgba(255, 149, 0, 0.05);
+}
+
+.reminder-item-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.reminder-identifier {
+    font-weight: 600;
+    font-size: 0.9375rem;
+    color: var(--text-primary);
+}
+
+.reminder-recipient {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+}
+
+.reminder-due {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+.reminder-item-status {
+    display: flex;
+    align-items: center;
+}
+
+.reminder-stage {
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--border-radius-sm);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.reminder-stage.overdue {
+    background: rgba(255, 59, 48, 0.15);
+    color: var(--color-danger);
+}
+
+.reminder-stage.due-today {
+    background: rgba(255, 149, 0, 0.15);
+    color: #b45309;
+}
+
+.reminder-stage.manual {
+    background: rgba(0, 122, 255, 0.15);
+    color: var(--color-primary);
+}
+
+.reminder-item-actions {
+    flex-shrink: 0;
+}
+
+.reminder-history-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+}
+
+.history-item-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.history-identifier {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+}
+
+.history-recipient {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.125rem;
+}
+
+.history-sent {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    margin-top: 0.125rem;
+}
+
+.history-item-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.25rem;
+}
+
+.reminder-mode {
+    font-size: 0.625rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.empty-reminder-state {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+
+.empty-reminder-state p {
+    margin: 0;
+}

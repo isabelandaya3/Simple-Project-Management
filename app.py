@@ -114,6 +114,21 @@ QCR_REVIEW_DAYS = 2
 # WORKDAY HELPER FUNCTIONS
 # =============================================================================
 
+def format_date_for_email(date_str):
+    """Format a date string for display in emails (e.g., 'Monday, 1/19/26')."""
+    if not date_str:
+        return 'N/A'
+    try:
+        if isinstance(date_str, str):
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        else:
+            date_obj = date_str
+        # Format: Monday, 1/19/26 (no leading zeros)
+        day_name = date_obj.strftime('%A')
+        return f"{day_name}, {date_obj.month}/{date_obj.day}/{date_obj.strftime('%y')}"
+    except:
+        return date_str or 'N/A'
+
 def is_business_day(date):
     """Check if a date is a business day (Mon-Fri)."""
     return date.weekday() < 5  # 0=Monday, 4=Friday
@@ -3404,6 +3419,7 @@ def get_items_needing_reminders():
     # SINGLE REVIEWER MODE
     # =====================================================================
     # Get items where reviewer hasn't responded and reviewer due date is today or yesterday
+    # Only for items that are open (not closed) and in the reviewer's court
     cursor.execute('''
         SELECT i.*, 
                ir.email as reviewer_email, ir.display_name as reviewer_name,
@@ -3412,6 +3428,7 @@ def get_items_needing_reminders():
         LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
         WHERE i.multi_reviewer_mode = 0 
+        AND i.closed_at IS NULL
         AND i.status IN ('Assigned', 'In Review')
         AND i.initial_reviewer_due_date IS NOT NULL
         AND DATE(i.initial_reviewer_due_date) <= ?
@@ -3443,6 +3460,7 @@ def get_items_needing_reminders():
     
     # Get items where QCR hasn't responded and QCR due date is today or yesterday
     # (Item must be in 'In QC' status, meaning reviewer has submitted)
+    # Only for items that are open (not closed) and in QCR's court
     cursor.execute('''
         SELECT i.*, 
                ir.email as reviewer_email, ir.display_name as reviewer_name,
@@ -3451,21 +3469,31 @@ def get_items_needing_reminders():
         LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
         WHERE i.multi_reviewer_mode = 0 
+        AND i.closed_at IS NULL
         AND i.status = 'In QC'
         AND i.qcr_due_date IS NOT NULL
         AND DATE(i.qcr_due_date) <= ?
         AND i.qcr_response_at IS NULL
         AND i.qcr_email_sent_at IS NOT NULL
-    ''', (today.strftime('%Y-%m-%d'),))
+        AND DATE(i.qcr_email_sent_at) < ?
+    ''', (today.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')))
     
     for item in cursor.fetchall():
         item = dict(item)
         due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+        qcr_email_sent_date = datetime.strptime(item['qcr_email_sent_at'][:10], '%Y-%m-%d').date() if item['qcr_email_sent_at'] else None
         
         if due_date == today:
             reminder_stage = 'due_today'
         elif due_date < today:
+            # Send overdue reminder if:
+            # 1. Due date was yesterday (normal case), OR
+            # 2. Due date passed but assignment was sent yesterday (late assignment case)
             if due_date == yesterday:
+                reminder_stage = 'overdue'
+            elif qcr_email_sent_date == yesterday:
+                # Assignment was sent yesterday for an already-overdue item
+                # Send one overdue reminder today
                 reminder_stage = 'overdue'
             else:
                 continue
@@ -3482,12 +3510,14 @@ def get_items_needing_reminders():
     # =====================================================================
     # MULTI-REVIEWER MODE - Individual Reviewers
     # =====================================================================
+    # Only for items that are open (not closed) and in reviewer's court
     cursor.execute('''
         SELECT i.*, 
                qcr.email as qcr_email, qcr.display_name as qcr_name
         FROM item i
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
         WHERE i.multi_reviewer_mode = 1 
+        AND i.closed_at IS NULL
         AND i.status IN ('Assigned', 'In Review')
         AND i.initial_reviewer_due_date IS NOT NULL
         AND DATE(i.initial_reviewer_due_date) <= ?
@@ -3528,26 +3558,38 @@ def get_items_needing_reminders():
     # =====================================================================
     # MULTI-REVIEWER MODE - QCR
     # =====================================================================
+    # Only for items that are open (not closed) and in QCR's court
     cursor.execute('''
         SELECT i.*, 
                qcr.email as qcr_email, qcr.display_name as qcr_name
         FROM item i
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
         WHERE i.multi_reviewer_mode = 1 
+        AND i.closed_at IS NULL
         AND i.status = 'In QC'
         AND i.qcr_due_date IS NOT NULL
         AND DATE(i.qcr_due_date) <= ?
         AND i.qcr_response_at IS NULL
-    ''', (today.strftime('%Y-%m-%d'),))
+        AND i.qcr_email_sent_at IS NOT NULL
+        AND DATE(i.qcr_email_sent_at) < ?
+    ''', (today.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')))
     
     for item in cursor.fetchall():
         item = dict(item)
         due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+        qcr_email_sent_date = datetime.strptime(item['qcr_email_sent_at'][:10], '%Y-%m-%d').date() if item['qcr_email_sent_at'] else None
         
         if due_date == today:
             reminder_stage = 'due_today'
         elif due_date < today:
+            # Send overdue reminder if:
+            # 1. Due date was yesterday (normal case), OR
+            # 2. Due date passed but assignment was sent yesterday (late assignment case)
             if due_date == yesterday:
+                reminder_stage = 'overdue'
+            elif qcr_email_sent_date == yesterday:
+                # Assignment was sent yesterday for an already-overdue item
+                # Send one overdue reminder today
                 reminder_stage = 'overdue'
             else:
                 continue
@@ -3604,8 +3646,9 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
     
     if role == 'reviewer':
         # Send reminder to reviewer
-        reviewer_due_date = item['initial_reviewer_due_date']
-        qcr_due_date = item['qcr_due_date']
+        reviewer_due_date = format_date_for_email(item['initial_reviewer_due_date'])
+        qcr_due_date = format_date_for_email(item['qcr_due_date'])
+        contractor_due_date = format_date_for_email(item['due_date'])
         
         if use_file_form:
             form_result = generate_reviewer_form_html(item_id)
@@ -3656,6 +3699,7 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Project Folder</td><td style="border:1px solid #ddd;">{folder_link_html}</td></tr>
     </table>
 
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -3695,7 +3739,8 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
     
     else:  # role == 'qcr'
         # Send reminder to QCR
-        qcr_due_date = item['qcr_due_date']
+        qcr_due_date = format_date_for_email(item['qcr_due_date'])
+        contractor_due_date = format_date_for_email(item['due_date'])
         
         if use_file_form:
             form_result = generate_qcr_form_html(item_id)
@@ -3743,8 +3788,9 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{contractor_due_date}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Project Folder</td><td style="border:1px solid #ddd;">{folder_link_html}</td></tr>
     </table>
 
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -3807,8 +3853,9 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
     folder_path = item['folder_link'] or 'Not set'
     use_file_form = is_local_mode() and folder_path != 'Not set'
     
-    reviewer_due_date = item['initial_reviewer_due_date']
-    qcr_due_date = item['qcr_due_date']
+    reviewer_due_date = format_date_for_email(item['initial_reviewer_due_date'])
+    qcr_due_date = format_date_for_email(item['qcr_due_date'])
+    contractor_due_date = format_date_for_email(item['due_date'])
     
     if use_file_form:
         form_result = generate_multi_reviewer_form(item_id, reviewer)
@@ -3864,9 +3911,9 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{contractor_due_date}</td></tr>
     </table>
 
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -5450,12 +5497,12 @@ def send_qcr_version_update_email(item_id, version):
         except:
             pass
     
-    subject = f"[LEB] {item['type']} {item['identifier']} – Reviewer response updated (v{version})"
+    subject = f"[LEB] {item['identifier']} – Reviewer response updated (v{version})"
     
     html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <h2 style="color:#444; margin-bottom:6px;">
-        [LEB] {item['type']} {item['identifier']} – Reviewer Response Updated
+        [LEB] {item['identifier']} – Reviewer Response Updated
     </h2>
 
     <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 15px; margin: 15px 0;">
@@ -5564,17 +5611,17 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
     
     # Build email based on action
     if qc_action == 'Approve':
-        subject = f"[LEB] {item['type']} {item['identifier']} – Your response (v{version}) was approved"
+        subject = f"[LEB] {item['identifier']} – Your response (v{version}) was approved"
         body_intro = f"""<p>Good news! Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #059669;">approved</strong> by QC.</p>"""
         action_color = '#059669'
         action_icon = '✅'
     elif qc_action == 'Modify':
-        subject = f"[LEB] {item['type']} {item['identifier']} – Your response (v{version}) was modified by QC"
+        subject = f"[LEB] {item['identifier']} – Your response (v{version}) was modified by QC"
         body_intro = f"""<p>Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #2563eb;">modified</strong> by QC and is now finalized.</p>"""
         action_color = '#2563eb'
         action_icon = '✏️'
     else:  # Send Back
-        subject = f"[LEB] {item['type']} {item['identifier']} – Revisions requested on v{version}"
+        subject = f"[LEB] {item['identifier']} – Revisions requested on v{version}"
         body_intro = f"""<p>Your response <strong>(v{version})</strong> for the following item has been <strong style="color: #dc2626;">returned</strong> for revision by QC.</p>"""
         action_color = '#dc2626'
         action_icon = '↩️'
@@ -5811,10 +5858,10 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
     </div>
     """
     
-    subject = f"[LEB] {item['type']} {item['identifier']} – QC Review Complete ({qc_action})"
+    subject = f"[LEB] {item['identifier']} – QC Review Complete ({qc_action})"
     
     html_body = f"""<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333;">
-<p style="font-size: 16px; font-weight: 600; color: #166534; margin-bottom: 15px;">✅ Final Response Recorded – {item['type']} {item['identifier']}</p>
+<p style="font-size: 16px; font-weight: 600; color: #166534; margin-bottom: 15px;">✅ Final Response Recorded – {item['identifier']}</p>
 
 <p>The QC review for the item below has been completed and the final response has been recorded. This item is now ready for closeout.</p>
 
@@ -7103,6 +7150,9 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
     if not reviewers:
         return {'success': False, 'error': 'No reviewers found'}
     
+    # Build list of initial reviewer names
+    initial_reviewers_list = ', '.join([r['reviewer_name'] for r in reviewers])
+    
     # Build reviewer summary HTML
     reviewer_summary = ""
     for idx, r in enumerate(reviewers, 1):
@@ -7119,7 +7169,7 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
     html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.6;">
     <div style="background:#059669; color:white; padding:20px; border-radius:8px 8px 0 0;">
         <h2 style="margin:0;">✅ QC Review Complete</h2>
-        <p style="margin:8px 0 0 0; opacity:0.9;">{item['type']} {item['identifier']}</p>
+        <p style="margin:8px 0 0 0; opacity:0.9;">{item['identifier']}</p>
     </div>
     
     <div style="background:#f8fafc; padding:20px; border:1px solid #e5e7eb; border-top:none;">
@@ -7130,6 +7180,7 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
                 <tr><td style="padding:5px 0; color:#666; width:140px;">Type:</td><td style="font-weight:600;">{item['type']}</td></tr>
                 <tr><td style="padding:5px 0; color:#666;">Identifier:</td><td style="font-weight:600;">{item['identifier']}</td></tr>
                 <tr><td style="padding:5px 0; color:#666;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
+                <tr><td style="padding:5px 0; color:#666;">Initial Reviewer(s):</td><td>{initial_reviewers_list}</td></tr>
                 <tr><td style="padding:5px 0; color:#666;">QC Reviewer:</td><td>{item['qcr_name'] or 'N/A'}</td></tr>
             </table>
         </div>
@@ -9687,6 +9738,143 @@ def api_pending_reminders():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/reminder-history', methods=['GET'])
+@login_required
+def api_reminder_history():
+    """Get history of sent reminders."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all reminders with item info, ordered by most recent
+    cursor.execute('''
+        SELECT r.*, i.identifier, i.type, i.title
+        FROM reminder_log r
+        LEFT JOIN item i ON r.item_id = i.id
+        ORDER BY r.sent_at DESC
+        LIMIT 200
+    ''')
+    reminders = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'reminders': reminders
+    })
+
+
+@app.route('/api/items/<int:item_id>/send-reminder', methods=['POST'])
+@admin_required
+def api_send_item_reminder(item_id):
+    """Manually send a reminder for a specific item."""
+    from datetime import date
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item with reviewer and QCR info
+    cursor.execute('''
+        SELECT i.*, 
+               ir.display_name as reviewer_name, ir.email as reviewer_email,
+               qcr.display_name as qcr_name, qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return jsonify({'success': False, 'error': 'Item not found'}), 404
+    
+    # Check if item is closed - don't send reminders for closed items
+    if item['closed_at']:
+        conn.close()
+        return jsonify({'success': False, 'error': 'Item is closed - no reminder needed'})
+    
+    # Check if status indicates item is not in anyone's court for review
+    if item['status'] in ('Closed', 'Ready for Response'):
+        conn.close()
+        return jsonify({'success': False, 'error': f'Item status is "{item["status"]}" - no reminder needed'})
+    
+    # Check if multi-reviewer
+    cursor.execute('SELECT COUNT(*) FROM item_reviewers WHERE item_id = ?', (item_id,))
+    reviewer_count = cursor.fetchone()[0]
+    is_multi_reviewer = reviewer_count > 0
+    
+    results = []
+    today = date.today()
+    
+    if is_multi_reviewer:
+        # Only send reviewer reminders if status indicates it's in reviewer's court
+        if item['status'] in ('Assigned', 'In Review'):
+            # Get reviewers who haven't responded
+            cursor.execute('''
+                SELECT * FROM item_reviewers 
+                WHERE item_id = ? AND responded_at IS NULL
+            ''', (item_id,))
+            pending_reviewers = cursor.fetchall()
+            
+            for reviewer in pending_reviewers:
+                result = send_multi_reviewer_reminder_email(
+                    dict(item), 
+                    dict(reviewer), 
+                    'reviewer', 
+                    today,
+                    'manual'
+                )
+                results.append({
+                    'recipient': reviewer['reviewer_email'],
+                    'role': 'reviewer',
+                    'success': result.get('success', False),
+                    'error': result.get('error')
+                })
+        
+        # Only send QCR reminders if status indicates it's in QCR's court
+        if item['status'] == 'In QC' and item['qcr_email'] and not item['qcr_response_at']:
+            result = send_multi_reviewer_qcr_reminder_email(dict(item), today, 'manual')
+            results.append({
+                'recipient': item['qcr_email'],
+                'role': 'qcr',
+                'success': result.get('success', False),
+                'error': result.get('error')
+            })
+        
+        conn.close()
+    else:
+        conn.close()
+        # Single reviewer mode - only send based on current status
+        if item['status'] in ('Assigned', 'In Review') and item['reviewer_email'] and not item['reviewer_response_at']:
+            # Status indicates reviewer's turn
+            result = send_single_reviewer_reminder_email(dict(item), 'reviewer', today, 'manual')
+            results.append({
+                'recipient': item['reviewer_email'],
+                'role': 'reviewer',
+                'success': result.get('success', False),
+                'error': result.get('error')
+            })
+        elif item['status'] == 'In QC' and item['qcr_email'] and not item['qcr_response_at']:
+            # Status indicates QCR's turn
+            result = send_single_reviewer_reminder_email(dict(item), 'qcr', today, 'manual')
+            results.append({
+                'recipient': item['qcr_email'],
+                'role': 'qcr',
+                'success': result.get('success', False),
+                'error': result.get('error')
+            })
+    
+    if not results:
+        return jsonify({
+            'success': False, 
+            'error': f'No reminders needed - item status is "{item["status"]}" which does not require a reminder'
+        })
+    
+    return jsonify({
+        'success': True,
+        'results': results
+    })
 
 # =============================================================================
 # STATIC FILE ROUTES
