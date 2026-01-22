@@ -63,14 +63,27 @@ async function api(endpoint, options = {}) {
 function formatDate(dateStr) {
     if (!dateStr) return '-';
     
-    const date = new Date(dateStr);
+    // Handle YYYY-MM-DD format by parsing as local time, not UTC
+    // This prevents the "day early" bug when displaying dates
+    let date;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        // Date-only string - parse as local time
+        const [year, month, day] = dateStr.split('-').map(Number);
+        date = new Date(year, month - 1, day);
+    } else {
+        date = new Date(dateStr);
+    }
+    
     if (isNaN(date.getTime())) return dateStr;
     
-    return date.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric'
-    });
+    // Format as "Wed, 1/22/26"
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const dayName = days[date.getDay()];
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+    const year = String(date.getFullYear()).slice(-2);
+    
+    return `${dayName}, ${month}/${day}/${year}`;
 }
 
 /**
@@ -218,10 +231,18 @@ function showApp() {
         
         // Show/hide admin features
         const manageUsersBtn = document.getElementById('btn-manage-users');
+        const pendingUpdatesNav = document.getElementById('nav-pending-updates');
+        
         if (state.user.role !== 'admin') {
             manageUsersBtn.style.display = 'none';
+            if (pendingUpdatesNav) pendingUpdatesNav.style.display = 'none';
         } else {
             manageUsersBtn.style.display = 'flex';
+            // Show pending updates nav for admins, load count
+            if (pendingUpdatesNav) {
+                pendingUpdatesNav.style.display = 'flex';
+                loadPendingUpdatesCount();
+            }
         }
     }
     
@@ -383,6 +404,12 @@ function generateItemRow(item) {
     const closedClass = item.closed_at ? 'closed-row' : '';
     const insufficientClass = item.is_contractor_window_insufficient ? 'insufficient-warning' : '';
     
+    // Check if item has pending contractor update
+    const hasPendingUpdate = item.has_pending_update === 1;
+    const pendingUpdateClass = hasPendingUpdate ? 'pending-update-row' : '';
+    const updateIcon = hasPendingUpdate ? 
+        `<span class="update-badge" title="Contractor update pending review${item.update_type === 'content_change' ? ' (Content Changed)' : ' (Due Date Only)'}">🔄</span>` : '';
+    
     // Check if item is unread by current user
     const readBy = item.read_by ? item.read_by.split(',').map(id => parseInt(id)) : [];
     const isUnread = state.user && !readBy.includes(state.user.id);
@@ -398,9 +425,9 @@ function generateItemRow(item) {
     const selectedClass = isSelected ? 'selected-row' : '';
     
     return `
-        <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass} ${selectedClass}">
+        <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass} ${selectedClass} ${pendingUpdateClass}">
             ${selectCheckbox}
-            <td>${unreadDot}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
+            <td>${unreadDot}${updateIcon}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
             <td>${warningIcon}${escapeHtml(item.identifier)}</td>
             <td>${escapeHtml(item.title) || '<span class="text-muted">No title</span>'}</td>
             <td>${formatDate(item.date_received)}</td>
@@ -610,6 +637,9 @@ function populateDetailDrawer(item) {
     } else {
         hide(warningBanner);
     }
+    
+    // Contractor update review panel (admin only)
+    renderContractorUpdatePanel(item);
     
     // Editable fields
     document.getElementById('detail-title-input').value = item.title || '';
@@ -1231,6 +1261,7 @@ function switchToWorkflow() {
     // Show workflow container, hide table container
     hide('table-container');
     hide('notifications-container');
+    hide('pending-updates-container');
     show('workflow-container');
     
     // Update header
@@ -1238,6 +1269,99 @@ function switchToWorkflow() {
     document.getElementById('page-subtitle').textContent = 'Reviewer Workflow Status';
     
     loadWorkflow();
+}
+
+/**
+ * Switch to pending updates view (admin only)
+ */
+function switchToPendingUpdates() {
+    state.currentView = 'pending-updates';
+    
+    // Update nav active state
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === 'pending-updates');
+    });
+    
+    // Show pending updates container, hide other containers
+    hide('table-container');
+    hide('workflow-container');
+    hide('notifications-container');
+    hide('reminders-container');
+    show('pending-updates-container');
+    
+    // Update header
+    document.getElementById('page-title').textContent = 'Contractor Updates';
+    document.getElementById('page-subtitle').textContent = 'Items Updated by Contractor';
+    
+    loadPendingUpdates();
+}
+
+/**
+ * Load pending contractor updates
+ */
+async function loadPendingUpdates() {
+    try {
+        const updates = await api('/pending-updates');
+        renderPendingUpdates(updates);
+    } catch (err) {
+        console.error('Failed to load pending updates:', err);
+        showToast('Failed to load pending updates', 'error');
+    }
+}
+
+/**
+ * Render pending contractor updates list
+ */
+function renderPendingUpdates(updates) {
+    const container = document.getElementById('pending-updates-list');
+    const emptyState = document.getElementById('pending-updates-empty-state');
+    
+    if (!updates || updates.length === 0) {
+        container.innerHTML = '';
+        show('pending-updates-empty-state');
+        return;
+    }
+    
+    hide('pending-updates-empty-state');
+    
+    container.innerHTML = updates.map(item => {
+        const isContentChange = item.update_type === 'content_change';
+        const wasReopened = item.reopened_from_closed === 1;
+        const typeClass = item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal';
+        
+        let changesText = [];
+        if (item.previous_due_date) changesText.push('Due Date');
+        if (item.previous_title) changesText.push('Title');
+        if (item.previous_priority) changesText.push('Priority');
+        
+        return `
+            <div class="pending-update-card ${isContentChange ? 'content-change' : 'due-date-only'}">
+                <div class="update-card-header">
+                    <div class="update-card-title">
+                        <span class="chip ${typeClass}">${escapeHtml(item.type)}</span>
+                        <strong>${escapeHtml(item.identifier)}</strong>
+                        ${wasReopened ? '<span class="reopened-badge">REOPENED</span>' : ''}
+                    </div>
+                    <div class="update-card-type">
+                        ${isContentChange ? '⚠️ Content Change' : '📅 Due Date Change'}
+                    </div>
+                </div>
+                <div class="update-card-body">
+                    <p class="update-card-title-text">${escapeHtml(item.title || 'No title')}</p>
+                    <p class="update-card-changes">Changes: ${changesText.join(', ') || 'Unknown'}</p>
+                    <p class="update-card-meta">
+                        <span>Detected: ${formatDateTime(item.update_detected_at)}</span>
+                        ${item.status_before_update ? `<span>Previous Status: ${item.status_before_update}</span>` : ''}
+                    </p>
+                </div>
+                <div class="update-card-actions">
+                    <button class="btn btn-primary btn-sm" onclick="openItem(${item.id})">
+                        Review Update
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 /**
@@ -1254,6 +1378,7 @@ function switchToNotifications() {
     // Show notifications container, hide other containers
     hide('table-container');
     hide('workflow-container');
+    hide('pending-updates-container');
     show('notifications-container');
     
     // Update header
@@ -2573,11 +2698,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 switchToNotifications();
             } else if (tab.dataset.view === 'reminders') {
                 switchToReminders();
+            } else if (tab.dataset.view === 'pending-updates') {
+                switchToPendingUpdates();
             } else if (tab.dataset.bucket) {
                 switchToItems(tab.dataset.bucket);
             }
         });
     });
+    
+    // Refresh pending updates button
+    const refreshUpdatesBtn = document.getElementById('btn-refresh-updates');
+    if (refreshUpdatesBtn) {
+        refreshUpdatesBtn.addEventListener('click', loadPendingUpdates);
+    }
     
     // Mark All Read button
     const markAllReadBtn = document.getElementById('btn-mark-all-read');
@@ -3177,8 +3310,183 @@ function setQcrFromItem(item) {
     }
 }
 
+// =============================================================================
+// CONTRACTOR UPDATE REVIEW FUNCTIONS
+// =============================================================================
+
+/**
+ * Render the contractor update review panel in the drawer
+ */
+function renderContractorUpdatePanel(item) {
+    const container = document.getElementById('contractor-update-panel');
+    if (!container) return;
+    
+    // Only show for admins and if there's a pending update
+    if (!state.user || state.user.role !== 'admin' || !item.has_pending_update) {
+        container.innerHTML = '';
+        hide(container);
+        return;
+    }
+    
+    const isContentChange = item.update_type === 'content_change';
+    const wasReopened = item.reopened_from_closed === 1;
+    
+    // Build change details
+    let changesHtml = '';
+    if (item.previous_due_date && item.due_date !== item.previous_due_date) {
+        changesHtml += `
+            <div class="update-change-item">
+                <span class="label">Due Date:</span>
+                <span class="old-value">${formatDate(item.previous_due_date)}</span>
+                <span class="arrow">→</span>
+                <span class="new-value">${formatDate(item.due_date)}</span>
+            </div>
+        `;
+    }
+    if (item.previous_title && item.title !== item.previous_title) {
+        changesHtml += `
+            <div class="update-change-item">
+                <span class="label">Title:</span>
+                <span class="old-value">${escapeHtml(item.previous_title?.substring(0, 50))}...</span>
+                <span class="arrow">→</span>
+                <span class="new-value">${escapeHtml(item.title?.substring(0, 50))}...</span>
+            </div>
+        `;
+    }
+    if (item.previous_priority && item.priority !== item.previous_priority) {
+        changesHtml += `
+            <div class="update-change-item">
+                <span class="label">Priority:</span>
+                <span class="old-value">${item.previous_priority}</span>
+                <span class="arrow">→</span>
+                <span class="new-value">${item.priority}</span>
+            </div>
+        `;
+    }
+    
+    const panelClass = isContentChange ? 'content-change' : '';
+    const headerIcon = isContentChange ? '⚠️' : '📅';
+    const headerText = wasReopened 
+        ? 'CLOSED ITEM UPDATED BY CONTRACTOR' 
+        : (isContentChange ? 'CONTENT CHANGE FROM CONTRACTOR' : 'DUE DATE UPDATE FROM CONTRACTOR');
+    
+    container.innerHTML = `
+        <div class="update-review-panel ${panelClass}">
+            <div class="update-review-header">
+                <span class="icon">${headerIcon}</span>
+                <span>${headerText}</span>
+                ${wasReopened ? '<span style="background:#dc2626;color:white;padding:2px 6px;border-radius:4px;font-size:0.75rem;margin-left:auto;">REOPENED</span>' : ''}
+            </div>
+            
+            <div class="update-changes">
+                ${changesHtml || '<div class="update-change-item"><span class="label">Update detected:</span> <span class="new-value">${formatDateTime(item.update_detected_at)}</span></div>'}
+            </div>
+            
+            ${item.status_before_update ? `<p style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.5rem;">Status before update: <strong>${item.status_before_update}</strong></p>` : ''}
+            
+            <div class="update-admin-note">
+                <label style="font-size:0.75rem;font-weight:500;color:var(--text-secondary);">Admin Note (will be included in notification):</label>
+                <textarea id="update-admin-note" placeholder="Describe the changes or provide context for reviewers..."></textarea>
+            </div>
+            
+            <div class="update-actions">
+                ${!isContentChange ? `
+                    <button class="btn btn-accept-due-date" onclick="reviewContractorUpdate(${item.id}, 'accept_due_date')">
+                        📅 Accept Due Date Change
+                    </button>
+                ` : ''}
+                <button class="btn btn-restart-workflow" onclick="reviewContractorUpdate(${item.id}, 'restart_workflow')">
+                    🔄 Restart Workflow to Reviewer
+                </button>
+                <button class="btn btn-dismiss-update" onclick="reviewContractorUpdate(${item.id}, 'dismiss')">
+                    ✕ Dismiss
+                </button>
+            </div>
+        </div>
+    `;
+    
+    show(container);
+}
+
+/**
+ * Handle admin review of contractor update
+ */
+async function reviewContractorUpdate(itemId, action) {
+    const adminNote = document.getElementById('update-admin-note')?.value || '';
+    
+    let confirmMsg = '';
+    switch (action) {
+        case 'accept_due_date':
+            confirmMsg = 'Accept the due date change? The appropriate party (reviewer or QCR) will be notified of the new due date.';
+            break;
+        case 'restart_workflow':
+            confirmMsg = 'Restart the workflow? This will clear all responses and send new review requests to the reviewer(s).';
+            break;
+        case 'dismiss':
+            confirmMsg = 'Dismiss this update without taking action?';
+            break;
+    }
+    
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+        const result = await api(`/item/${itemId}/review-update`, {
+            method: 'POST',
+            body: JSON.stringify({
+                action: action,
+                admin_note: adminNote,
+                apply_new_values: true
+            })
+        });
+        
+        if (result.success) {
+            let message = 'Update processed successfully.';
+            if (result.emails_sent && result.emails_sent.length > 0) {
+                const successEmails = result.emails_sent.filter(e => e.result?.success);
+                message += ` Sent ${successEmails.length} notification(s).`;
+            }
+            showToast(message, 'success');
+            
+            // Refresh the item
+            const item = await api(`/item/${itemId}`);
+            populateDetailDrawer(item);
+            
+            // Refresh items list
+            loadItems();
+        } else {
+            showToast(result.error || 'Failed to process update', 'error');
+        }
+    } catch (err) {
+        console.error('Failed to review update:', err);
+        showToast('Failed to process update: ' + err.message, 'error');
+    }
+}
+
+/**
+ * Load pending updates count for stats
+ */
+async function loadPendingUpdatesCount() {
+    try {
+        const updates = await api('/pending-updates');
+        const count = updates.length;
+        
+        // Update the pending updates badge in sidebar
+        const badge = document.getElementById('count-pending-updates');
+        if (badge) {
+            badge.textContent = count > 0 ? count : '';
+            badge.style.display = count > 0 ? 'inline-flex' : 'none';
+        }
+        
+        return count;
+    } catch (err) {
+        console.error('Failed to load pending updates:', err);
+        return 0;
+    }
+}
+
 // Global function aliases for onclick handlers in HTML
 window.openItem = openDetailDrawer;
 window.removeReviewerChip = removeReviewerChip;
 window.addReviewerChip = addReviewerChip;
 window.selectQcr = selectQcr;
+window.reviewContractorUpdate = reviewContractorUpdate;

@@ -80,6 +80,11 @@
                         <span class="nav-tab-icon">📧</span>
                         <span class="nav-tab-label">Email & Responses</span>
                     </button>
+                    <button class="nav-tab" data-view="pending-updates" id="nav-pending-updates" style="display:none;">
+                        <span class="nav-tab-icon">🔄</span>
+                        <span class="nav-tab-label">Contractor Updates</span>
+                        <span class="nav-tab-count pending-updates-badge" id="count-pending-updates">0</span>
+                    </button>
                     <button class="nav-tab" data-view="notifications">
                         <span class="nav-tab-icon">🔔</span>
                         <span class="nav-tab-label">Notifications</span>
@@ -315,6 +320,25 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Pending Contractor Updates View (Admin Only) -->
+            <div class="pending-updates-container hidden" id="pending-updates-container">
+                <div class="pending-updates-header">
+                    <h2>🔄 Contractor Updates</h2>
+                    <p>Items updated by contractor that need admin review</p>
+                    <div class="pending-updates-actions">
+                        <button class="btn btn-secondary btn-sm" id="btn-refresh-updates">Refresh</button>
+                    </div>
+                </div>
+                <div class="pending-updates-list" id="pending-updates-list">
+                    <!-- Pending updates will be loaded here -->
+                </div>
+                <div class="empty-state hidden" id="pending-updates-empty-state">
+                    <div class="empty-icon">✅</div>
+                    <h3>No pending updates</h3>
+                    <p>All contractor updates have been reviewed. Items will appear here when contractors make changes.</p>
+                </div>
+            </div>
         </main>
 
         <!-- Detail Drawer -->
@@ -329,6 +353,11 @@
                 <div class="warning-banner hidden" id="insufficient-window-warning">
                     <span class="warning-icon">⚠️</span>
                     <span id="warning-text">Contractor provided insufficient review window</span>
+                </div>
+
+                <!-- Contractor Update Review Panel (Admin Only) -->
+                <div id="contractor-update-panel" class="hidden">
+                    <!-- Dynamic content will be rendered by JavaScript -->
                 </div>
 
                 <!-- Item Info -->

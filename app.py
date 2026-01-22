@@ -57,6 +57,15 @@ except ImportError:
     HAS_AIRTABLE = False
     print("INFO: Airtable integration not available.")
 
+# Optional: openpyxl for Excel file updates
+try:
+    from openpyxl import load_workbook
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+    print("INFO: openpyxl not installed. Excel tracker updates will be disabled.")
+    print("Install with: pip install openpyxl")
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -71,7 +80,8 @@ DEFAULT_CONFIG = {
     "outlook_folder": "Inbox",  # Can be "Inbox" or a subfolder like "LEB ACC"
     "poll_interval_minutes": 5,
     "server_port": 5000,
-    "project_name": "LEB – Local Tracker"
+    "project_name": "LEB – Local Tracker",
+    "rfi_tracker_excel_path": r"\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\LEB RFI Bulletin Tracker.xlsx"
 }
 
 def load_config():
@@ -115,7 +125,7 @@ QCR_REVIEW_DAYS = 2
 # =============================================================================
 
 def format_date_for_email(date_str):
-    """Format a date string for display in emails (e.g., 'Monday, 1/19/26')."""
+    """Format a date string for display in emails (e.g., 'Wed, 1/19/26')."""
     if not date_str:
         return 'N/A'
     try:
@@ -123,11 +133,161 @@ def format_date_for_email(date_str):
             date_obj = datetime.strptime(date_str, '%Y-%m-%d')
         else:
             date_obj = date_str
-        # Format: Monday, 1/19/26 (no leading zeros)
-        day_name = date_obj.strftime('%A')
+        # Format: Wed, 1/19/26 (abbreviated day name, no leading zeros)
+        day_name = date_obj.strftime('%a')  # Abbreviated day name
         return f"{day_name}, {date_obj.month}/{date_obj.day}/{date_obj.strftime('%y')}"
     except:
         return date_str or 'N/A'
+
+
+# =============================================================================
+# RFI BULLETIN TRACKER EXCEL UPDATE
+# =============================================================================
+
+def update_rfi_tracker_excel(item, action='close'):
+    """
+    Update the RFI Bulletin Tracker Excel file when an RFI is closed or reopened.
+    
+    Args:
+        item: Dictionary containing item data (must have type='RFI')
+        action: 'close' to add/update entry, 'reopen' to mark as reopened
+    
+    Returns:
+        dict with 'success' and optional 'error' or 'message'
+    """
+    if not HAS_OPENPYXL:
+        return {'success': False, 'error': 'openpyxl not installed'}
+    
+    # Only process RFIs
+    if item.get('type') != 'RFI':
+        return {'success': True, 'message': 'Not an RFI, skipping Excel update'}
+    
+    excel_path = CONFIG.get('rfi_tracker_excel_path')
+    if not excel_path:
+        return {'success': False, 'error': 'RFI tracker Excel path not configured'}
+    
+    excel_file = Path(excel_path)
+    if not excel_file.exists():
+        return {'success': False, 'error': f'Excel file not found: {excel_path}'}
+    
+    try:
+        # Extract RFI number from identifier (e.g., "RFI #123" -> "123")
+        identifier = item.get('identifier', '')
+        rfi_number = ''
+        rfi_match = re.search(r'#?(\d+)', identifier)
+        if rfi_match:
+            rfi_number = rfi_match.group(1)
+        else:
+            rfi_number = identifier  # Use as-is if no number found
+        
+        # Get title (name after numbers)
+        title = item.get('title', '') or ''
+        
+        # Get the contractor's question - use source_subject or title as fallback
+        # The question typically comes from the original email subject/body
+        question = item.get('source_subject', '') or title
+        
+        # Get the final response
+        response = item.get('final_response_text', '') or item.get('response_text', '') or ''
+        
+        # Load the workbook
+        wb = load_workbook(excel_path)
+        ws = wb.active  # Use the active sheet, or specify by name: wb['SheetName']
+        
+        # Find headers to determine columns (look in first few rows)
+        header_row = None
+        col_rfi_id = None
+        col_title = None
+        col_question = None
+        col_response = None
+        col_status = None
+        
+        for row_num in range(1, 6):  # Check first 5 rows for headers
+            for col_num in range(1, 20):  # Check first 20 columns
+                cell_value = str(ws.cell(row=row_num, column=col_num).value or '').strip().lower()
+                if 'rfi' in cell_value and ('id' in cell_value or '#' in cell_value or 'number' in cell_value or cell_value == 'rfi'):
+                    col_rfi_id = col_num
+                    header_row = row_num
+                elif cell_value in ('title', 'name', 'subject', 'description'):
+                    col_title = col_num
+                    header_row = row_num
+                elif 'question' in cell_value or 'query' in cell_value:
+                    col_question = col_num
+                    header_row = row_num
+                elif 'response' in cell_value or 'answer' in cell_value or 'reply' in cell_value:
+                    col_response = col_num
+                    header_row = row_num
+                elif 'status' in cell_value:
+                    col_status = col_num
+                    header_row = row_num
+        
+        if not header_row:
+            # Default to assuming row 1 is headers with standard column layout
+            header_row = 1
+            col_rfi_id = 1
+            col_title = 2
+            col_question = 3
+            col_response = 4
+            col_status = 5
+        
+        # Find existing row with this RFI number, or find first empty row
+        existing_row = None
+        first_empty_row = None
+        
+        for row_num in range(header_row + 1, ws.max_row + 2):
+            cell_value = ws.cell(row=row_num, column=col_rfi_id or 1).value
+            if cell_value is not None:
+                # Check if this RFI already exists
+                if str(cell_value).strip() == rfi_number:
+                    existing_row = row_num
+                    break
+            else:
+                # Found an empty row
+                if first_empty_row is None:
+                    first_empty_row = row_num
+        
+        if first_empty_row is None:
+            first_empty_row = ws.max_row + 1
+        
+        target_row = existing_row or first_empty_row
+        
+        if action == 'close':
+            # Add or update the RFI entry
+            if col_rfi_id:
+                ws.cell(row=target_row, column=col_rfi_id).value = rfi_number
+            if col_title:
+                ws.cell(row=target_row, column=col_title).value = title
+            if col_question:
+                ws.cell(row=target_row, column=col_question).value = question
+            if col_response:
+                ws.cell(row=target_row, column=col_response).value = response
+            if col_status:
+                ws.cell(row=target_row, column=col_status).value = 'Closed'
+            
+            action_msg = 'updated' if existing_row else 'added'
+            
+        elif action == 'reopen':
+            # Mark the entry as reopened (if it exists)
+            if existing_row and col_status:
+                ws.cell(row=target_row, column=col_status).value = 'Reopened'
+                action_msg = 'marked as reopened'
+            else:
+                action_msg = 'no existing entry to update'
+        
+        # Save the workbook
+        wb.save(excel_path)
+        wb.close()
+        
+        return {
+            'success': True, 
+            'message': f'RFI {rfi_number} {action_msg} in Excel tracker (row {target_row})'
+        }
+        
+    except PermissionError:
+        return {'success': False, 'error': 'Excel file is open by another user. Please close it and try again.'}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to update Excel: {str(e)}'}
+
 
 def is_business_day(date):
     """Check if a date is a business day (Mon-Fri)."""
@@ -2017,7 +2177,7 @@ def init_db():
             recipient_email TEXT NOT NULL,
             recipient_role TEXT NOT NULL,
             due_date DATE NOT NULL,
-            reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue')),
+            reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue', 'manual')),
             sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
             UNIQUE(item_id, recipient_email, recipient_role, reminder_stage)
@@ -2029,6 +2189,88 @@ def init_db():
         cursor.execute('ALTER TABLE reminder_log ADD COLUMN item_reviewer_id INTEGER')
     except:
         pass
+    
+    # Migration: Update reminder_log CHECK constraint to allow 'manual' stage
+    # SQLite doesn't support ALTER TABLE to modify constraints, so we recreate the table
+    try:
+        # Check if we need to migrate (old constraint doesn't allow 'manual')
+        cursor.execute("SELECT sql FROM sqlite_master WHERE name = 'reminder_log'")
+        table_sql = cursor.fetchone()
+        if table_sql and "'manual'" not in table_sql[0]:
+            # Need to migrate - recreate table with new constraint
+            cursor.execute('ALTER TABLE reminder_log RENAME TO reminder_log_old')
+            cursor.execute('''
+                CREATE TABLE reminder_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    reminder_type TEXT NOT NULL,
+                    recipient_email TEXT NOT NULL,
+                    recipient_role TEXT NOT NULL,
+                    due_date DATE NOT NULL,
+                    reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue', 'manual')),
+                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    item_reviewer_id INTEGER,
+                    FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+                    UNIQUE(item_id, recipient_email, recipient_role, reminder_stage)
+                )
+            ''')
+            cursor.execute('''
+                INSERT INTO reminder_log (id, item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, sent_at, item_reviewer_id)
+                SELECT id, item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, sent_at, item_reviewer_id
+                FROM reminder_log_old
+            ''')
+            cursor.execute('DROP TABLE reminder_log_old')
+            print("Migrated reminder_log table to support 'manual' reminder stage")
+    except Exception as e:
+        print(f"Note: reminder_log migration skipped or failed: {e}")
+    
+    # ==========================================================================
+    # CONTRACTOR UPDATE TRACKING - for handling ACC updates during/after review
+    # ==========================================================================
+    # Add columns to track contractor updates from ACC
+    acc_update_columns = [
+        ('has_pending_update', 'INTEGER DEFAULT 0'),  # Flag for admin review
+        ('update_type', 'TEXT'),  # 'due_date_only' or 'content_change'
+        ('update_detected_at', 'TIMESTAMP'),  # When the update was detected
+        ('update_reviewed_at', 'TIMESTAMP'),  # When admin reviewed the update
+        ('update_admin_note', 'TEXT'),  # Admin's note about the change
+        ('previous_due_date', 'DATE'),  # Store old due date before update
+        ('previous_title', 'TEXT'),  # Store old title before update
+        ('previous_priority', 'TEXT'),  # Store old priority before update
+        ('update_email_body', 'TEXT'),  # Store relevant portion of update email
+        ('reopened_from_closed', 'INTEGER DEFAULT 0'),  # If item was reopened from Closed
+        ('status_before_update', 'TEXT'),  # Status before the update came in
+    ]
+    for col_name, col_def in acc_update_columns:
+        try:
+            cursor.execute(f'ALTER TABLE item ADD COLUMN {col_name} {col_def}')
+        except:
+            pass
+    
+    # Item update history table - tracks all updates from ACC
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS item_update_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_type TEXT NOT NULL,
+            old_due_date DATE,
+            new_due_date DATE,
+            old_title TEXT,
+            new_title TEXT,
+            old_priority TEXT,
+            new_priority TEXT,
+            email_entry_id TEXT,
+            email_subject TEXT,
+            email_body_preview TEXT,
+            admin_reviewed_at TIMESTAMP,
+            admin_reviewed_by INTEGER,
+            admin_note TEXT,
+            action_taken TEXT,
+            FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+            FOREIGN KEY (admin_reviewed_by) REFERENCES user(id)
+        )
+    ''')
     
     # Create default admin user if no users exist
     cursor.execute('SELECT COUNT(*) FROM user')
@@ -3719,6 +3961,8 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
             </div>"""
         
         # Send via Outlook - NO CC
+        # Record BEFORE sending to prevent duplicates if Outlook blocks then releases the email
+        record_reminder_sent(item_id, 'single_reviewer', item['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage)
         try:
             pythoncom.CoInitialize()
             outlook = win32com.client.Dispatch("Outlook.Application")
@@ -3729,10 +3973,11 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
             # NO CC for reminder emails
             mail.Send()
             
-            record_reminder_sent(item_id, 'single_reviewer', item['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage)
             print(f"  [Reminder] Sent {reminder_stage} reminder to reviewer for item {item_id}")
             return {'success': True}
         except Exception as e:
+            # Note: reminder is already recorded to prevent duplicates even if send fails
+            print(f"  [Reminder] Failed to send {reminder_stage} reminder to reviewer for item {item_id}: {e}")
             return {'success': False, 'error': str(e)}
         finally:
             pythoncom.CoUninitialize()
@@ -3809,6 +4054,8 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
             </div>"""
         
         # Send via Outlook - NO CC
+        # Record BEFORE sending to prevent duplicates if Outlook blocks then releases the email
+        record_reminder_sent(item_id, 'single_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
         try:
             pythoncom.CoInitialize()
             outlook = win32com.client.Dispatch("Outlook.Application")
@@ -3819,10 +4066,11 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
             # NO CC for reminder emails
             mail.Send()
             
-            record_reminder_sent(item_id, 'single_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
             print(f"  [Reminder] Sent {reminder_stage} reminder to QCR for item {item_id}")
             return {'success': True}
         except Exception as e:
+            # Note: reminder is already recorded to prevent duplicates even if send fails
+            print(f"  [Reminder] Failed to send {reminder_stage} reminder to QCR for item {item_id}: {e}")
             return {'success': False, 'error': str(e)}
         finally:
             pythoncom.CoUninitialize()
@@ -3932,6 +4180,8 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
         </div>"""
     
     # Send via Outlook - Only to this specific reviewer, NO CC
+    # Record BEFORE sending to prevent duplicates if Outlook blocks then releases the email
+    record_reminder_sent(item_id, 'multi_reviewer', reviewer['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage, reviewer['id'])
     try:
         pythoncom.CoInitialize()
         outlook = win32com.client.Dispatch("Outlook.Application")
@@ -3942,10 +4192,11 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
         # NO CC for reminder emails
         mail.Send()
         
-        record_reminder_sent(item_id, 'multi_reviewer', reviewer['reviewer_email'], 'reviewer', due_date.strftime('%Y-%m-%d'), reminder_stage, reviewer['id'])
         print(f"  [Reminder] Sent {reminder_stage} reminder to {reviewer['reviewer_name']} for item {item_id}")
         return {'success': True}
     except Exception as e:
+        # Note: reminder is already recorded to prevent duplicates even if send fails
+        print(f"  [Reminder] Failed to send {reminder_stage} reminder to {reviewer['reviewer_name']} for item {item_id}: {e}")
         return {'success': False, 'error': str(e)}
     finally:
         pythoncom.CoUninitialize()
@@ -4044,6 +4295,8 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
         </div>"""
     
     # Send via Outlook - NO CC
+    # Record BEFORE sending to prevent duplicates if Outlook blocks then releases the email
+    record_reminder_sent(item_id, 'multi_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
     try:
         pythoncom.CoInitialize()
         outlook = win32com.client.Dispatch("Outlook.Application")
@@ -4054,10 +4307,11 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
         # NO CC for reminder emails
         mail.Send()
         
-        record_reminder_sent(item_id, 'multi_reviewer', item['qcr_email'], 'qcr', due_date.strftime('%Y-%m-%d'), reminder_stage)
         print(f"  [Reminder] Sent {reminder_stage} reminder to QCR for item {item_id}")
         return {'success': True}
     except Exception as e:
+        # Note: reminder is already recorded to prevent duplicates even if send fails
+        print(f"  [Reminder] Failed to send {reminder_stage} reminder to QCR for item {item_id}: {e}")
         return {'success': False, 'error': str(e)}
     finally:
         pythoncom.CoUninitialize()
@@ -4335,32 +4589,121 @@ class EmailPoller:
                     
                     # Check if item exists
                     cursor.execute('''
-                        SELECT id, due_date, priority FROM item 
+                        SELECT id, due_date, priority, title, status, closed_at,
+                               reviewer_response_status, qcr_response_status,
+                               initial_reviewer_id, qcr_id, folder_link
+                        FROM item 
                         WHERE identifier = ? AND bucket = ?
                     ''', (identifier, bucket))
                     existing = cursor.fetchone()
                     
                     item_id = None
                     if existing:
-                        # Update existing item
+                        # EXISTING ITEM - Check for updates from contractor
                         item_id = existing['id']
-                        updates = ['last_email_at = ?']
-                        params = [received_at]
+                        existing_due = existing['due_date']
+                        existing_priority = existing['priority']
+                        existing_title = existing['title']
+                        current_status = existing['status']
+                        was_closed = existing['closed_at'] is not None
                         
-                        # Only update due_date if currently empty
-                        if not existing['due_date'] and due_date:
-                            updates.append('due_date = ?')
-                            params.append(due_date)
+                        # Detect what changed
+                        due_date_changed = due_date and existing_due and due_date != existing_due
+                        priority_changed = priority and existing_priority and priority != existing_priority
+                        title_changed = title and existing_title and title.strip() != existing_title.strip()
                         
-                        # Only update priority if currently empty
-                        if not existing['priority'] and priority:
-                            updates.append('priority = ?')
-                            params.append(priority)
+                        # Check if this is a meaningful update (item is in workflow or was closed)
+                        in_active_workflow = current_status in ('Assigned', 'In Review', 'In QC', 'Ready for Response')
                         
-                        params.append(item_id)
-                        cursor.execute(f'''
-                            UPDATE item SET {', '.join(updates)} WHERE id = ?
-                        ''', params)
+                        if (due_date_changed or priority_changed or title_changed) and (in_active_workflow or was_closed):
+                            # This is a contractor update that needs admin attention
+                            update_type = 'due_date_only' if (due_date_changed and not title_changed and not priority_changed) else 'content_change'
+                            
+                            # Log the update in history
+                            cursor.execute('''
+                                INSERT INTO item_update_history (
+                                    item_id, update_type, 
+                                    old_due_date, new_due_date,
+                                    old_title, new_title,
+                                    old_priority, new_priority,
+                                    email_entry_id, email_subject, email_body_preview
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                item_id, update_type,
+                                existing_due, due_date,
+                                existing_title, title if title_changed else None,
+                                existing_priority, priority if priority_changed else None,
+                                message_id, subject, body[:500]
+                            ))
+                            
+                            # Flag the item for admin review
+                            cursor.execute('''
+                                UPDATE item SET
+                                    has_pending_update = 1,
+                                    update_type = ?,
+                                    update_detected_at = ?,
+                                    previous_due_date = ?,
+                                    previous_title = ?,
+                                    previous_priority = ?,
+                                    update_email_body = ?,
+                                    reopened_from_closed = ?,
+                                    status_before_update = ?,
+                                    last_email_at = ?
+                                WHERE id = ?
+                            ''', (
+                                update_type, received_at,
+                                existing_due if due_date_changed else None,
+                                existing_title if title_changed else None,
+                                existing_priority if priority_changed else None,
+                                body[:1000],
+                                1 if was_closed else 0,
+                                current_status,
+                                received_at,
+                                item_id
+                            ))
+                            
+                            # Create notification for admin
+                            update_desc = []
+                            if due_date_changed:
+                                update_desc.append(f"Due Date: {existing_due} → {due_date}")
+                            if title_changed:
+                                update_desc.append("Title changed")
+                            if priority_changed:
+                                update_desc.append(f"Priority: {existing_priority} → {priority}")
+                            
+                            notification_msg = f"Contractor updated {item_type} {identifier}. Changes: {'; '.join(update_desc)}"
+                            if was_closed:
+                                notification_msg = f"⚠️ CLOSED ITEM UPDATED: {notification_msg}"
+                            
+                            create_notification(
+                                'contractor_update',
+                                f'🔄 Contractor Update: {identifier}',
+                                notification_msg,
+                                item_id=item_id,
+                                action_url=f'/api/item/{item_id}/review-update',
+                                action_label='Review Update'
+                            )
+                            
+                            print(f"  [ACC Update] Detected update for {identifier}: {update_type}")
+                        else:
+                            # Normal update - just update last_email_at
+                            updates = ['last_email_at = ?']
+                            params = [received_at]
+                            
+                            # Only update due_date if currently empty
+                            if not existing_due and due_date:
+                                updates.append('due_date = ?')
+                                params.append(due_date)
+                            
+                            # Only update priority if currently empty
+                            if not existing_priority and priority:
+                                updates.append('priority = ?')
+                                params.append(priority)
+                            
+                            params.append(item_id)
+                            cursor.execute(f'''
+                                UPDATE item SET {', '.join(updates)} WHERE id = ?
+                            ''', params)
                     else:
                         # Create new item
                         folder_link = create_item_folder(item_type, identifier, bucket, title)
@@ -4902,6 +5245,416 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
     except Exception as e:
         conn.close()
         return {'success': False, 'error': str(e)}
+
+# =============================================================================
+# CONTRACTOR UPDATE NOTIFICATION EMAILS
+# =============================================================================
+
+def send_due_date_update_email(item_id, recipient_type, new_due_date, admin_note='', was_reopened=False):
+    """Send email notification about a due date update from contractor.
+    
+    Args:
+        item_id: The item ID
+        recipient_type: 'reviewer' or 'qcr'
+        new_due_date: The new due date from contractor
+        admin_note: Optional note from admin about the update
+        was_reopened: Whether the item was reopened from closed status
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Determine recipient
+    if recipient_type == 'qcr':
+        to_email = item['qcr_email']
+        to_name = item['qcr_name']
+        role_label = 'QCR'
+        due_date_field = item['qcr_due_date']
+    else:
+        to_email = item['reviewer_email']
+        to_name = item['reviewer_name']
+        role_label = 'Initial Reviewer'
+        due_date_field = item['initial_reviewer_due_date']
+    
+    if not to_email:
+        conn.close()
+        return {'success': False, 'error': f'No {recipient_type} email found'}
+    
+    conn.close()
+    
+    # Recalculate the appropriate due date based on new contractor due date
+    if item['date_received'] and new_due_date:
+        due_dates = calculate_review_due_dates(
+            item['date_received'], new_due_date, item['priority']
+        )
+        if recipient_type == 'qcr':
+            new_internal_due = due_dates['qcr_due_date']
+        else:
+            new_internal_due = due_dates['initial_reviewer_due_date']
+    else:
+        new_internal_due = due_date_field
+    
+    # Create folder link
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
+    # Build subject with REOPENED or UPDATED prefix
+    if was_reopened:
+        subject = f"[LEB] {item['identifier']} – REOPENED: Due Date Updated by Contractor"
+        header_text = "📅🔄 ITEM REOPENED - Due Date Update"
+        header_color = "#dc2626"
+        subtext = "This item was <strong>previously closed</strong> but has been reopened by the contractor with a new due date."
+    else:
+        subject = f"[LEB] {item['identifier']} – UPDATED: Due Date Changed by Contractor"
+        header_text = "📅 Due Date Update"
+        header_color = "#2563eb"
+        subtext = "The contractor has updated the due date for this item."
+    
+    # Build the email
+    html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{header_color}; margin-bottom:6px;">
+        {header_text}: {item['identifier']}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        {subtext}
+    </p>
+
+    <!-- UPDATE NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:2px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af;">
+            <strong>📢 Due Date Changed</strong>
+        </div>
+        <div style="margin-top:10px; font-size:13px; color:#1e40af;">
+            <table cellpadding="4" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                    <td><strong>Previous Contractor Due Date:</strong></td>
+                    <td style="text-decoration:line-through; color:#dc2626;">{item['previous_due_date'] or item['due_date'] or 'N/A'}</td>
+                </tr>
+                <tr>
+                    <td><strong>New Contractor Due Date:</strong></td>
+                    <td style="color:#059669; font-weight:bold;">{new_due_date}</td>
+                </tr>
+                <tr>
+                    <td><strong>Your Updated Due Date:</strong></td>
+                    <td style="color:#2563eb; font-weight:bold;">{format_date_for_email(new_internal_due)}</td>
+                </tr>
+            </table>
+        </div>
+    </div>
+    
+    {f'''<!-- ADMIN NOTE -->
+    <div style="margin:15px 0; padding:15px; background:#fef3c7; border:2px solid #f59e0b; border-radius:8px;">
+        <div style="font-size:14px; color:#92400e; font-weight:bold;">📋 Note from Administrator:</div>
+        <div style="margin-top:8px; font-size:13px; color:#78350f;">{admin_note}</div>
+    </div>''' if admin_note else ''}
+
+    <p style="font-size:13px; color:#666;">
+        Please adjust your timeline accordingly. Your review workflow continues as normal.
+    </p>
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Role</td>
+            <td style="border:1px solid #ddd;">{role_label}</td>
+        </tr>
+    </table>
+
+    <!-- FOLDER LINK -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Item Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated notification. If you have questions, please contact the project administrator.</em>
+    </p>
+
+</div>"""
+
+    # Send email
+    pythoncom.CoInitialize()
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook.CreateItem(0)
+        mail.To = to_email
+        mail.Subject = subject
+        mail.HTMLBody = html_body
+        mail.Send()
+        
+        return {'success': True, 'message': f'Due date update email sent to {recipient_type}'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
+    """Send email to reviewer(s) notifying them the workflow is restarting due to content changes.
+    
+    Args:
+        item_id: The item ID
+        admin_note: Admin's note about what changed
+        was_closed: Whether the item was previously closed
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item details
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Check if multi-reviewer mode
+    is_multi = item['multi_reviewer_mode']
+    
+    if is_multi:
+        # Get all reviewers
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, email_token
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = cursor.fetchall()
+    else:
+        # Single reviewer
+        reviewers = [{
+            'reviewer_name': item['reviewer_name'],
+            'reviewer_email': item['reviewer_email'],
+            'email_token': item['email_token_reviewer']
+        }] if item['reviewer_email'] else []
+    
+    if not reviewers:
+        conn.close()
+        return {'success': False, 'error': 'No reviewers found'}
+    
+    conn.close()
+    
+    # Create folder link
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
+    # Build status message
+    if was_closed:
+        status_msg = "This item was previously <strong>CLOSED</strong> but has been reopened due to contractor changes."
+        header_color = "#dc2626"
+        icon = "🔄⚠️"
+    else:
+        status_msg = "The contractor has made changes to this item that require a fresh review."
+        header_color = "#f59e0b"
+        icon = "🔄"
+    
+    subject = f"[LEB] {item['identifier']} – {'REOPENED: ' if was_closed else ''}Review Restart Required"
+    
+    # Priority color
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    emails_sent = 0
+    errors = []
+    
+    pythoncom.CoInitialize()
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        
+        for reviewer in reviewers:
+            if not reviewer['reviewer_email']:
+                continue
+            
+            # Generate form file path for link
+            form_file_link = ''
+            if is_local_mode() and folder_path != 'Not set':
+                form_result = generate_reviewer_form_html(item_id)
+                if form_result['success']:
+                    form_file_link = f'file:///{form_result["path"].replace(chr(92), "/")}'
+            
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{header_color}; margin-bottom:6px;">
+        {icon} {'ITEM REOPENED' if was_closed else 'REVIEW RESTART'}: {item['identifier']}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        {status_msg}
+    </p>
+
+    <!-- CHANGE NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#fef3c7; border:2px solid #f59e0b; border-radius:8px;">
+        <div style="font-size:15px; color:#92400e; font-weight:bold;">
+            {'⚠️ ITEM REOPENED - NEW REVIEW REQUIRED' if was_closed else '⚠️ CONTRACTOR CONTENT CHANGE'}
+        </div>
+        <div style="font-size:13px; color:#92400e; margin-top:8px;">
+            Your previous response has been cleared. Please review the updated materials and submit a new response.
+        </div>
+    </div>
+    
+    {f'''<!-- ADMIN NOTE -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📋 What Changed (Note from Administrator):</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81;">{admin_note}</div>
+    </div>''' if admin_note else '''<!-- NO ADMIN NOTE PROVIDED -->
+    <div style="margin:10px 0; padding:10px; background:#fef2f2; border:1px solid #fecaca; border-radius:8px;">
+        <div style="font-size:13px; color:#991b1b;">No specific changes were noted by the administrator. Please review the updated materials carefully.</div>
+    </div>'''}
+    </div>
+
+    <!-- ACTION BUTTON -->
+    {f'''<div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#dc2626" style="background:#dc2626; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#dc2626; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:280px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN NEW RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>''' if form_file_link else ''}
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(item['initial_reviewer_due_date'])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
+        </tr>
+    </table>
+
+    <!-- FOLDER LINK -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Item Folder (review updated materials here):</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated notification. Please contact the project administrator if you have questions about the changes.</em>
+    </p>
+
+</div>"""
+
+            try:
+                mail = outlook.CreateItem(0)
+                mail.To = reviewer['reviewer_email']
+                if item['qcr_email']:
+                    mail.CC = item['qcr_email']
+                mail.Subject = subject
+                mail.HTMLBody = html_body
+                mail.Send()
+                emails_sent += 1
+            except Exception as e:
+                errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
+        
+        # Update item to show email was sent for restart
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE item SET 
+                reviewer_email_sent_at = ?,
+                reviewer_response_status = 'Email Sent'
+            WHERE id = ?
+        ''', (datetime.now().isoformat(), item_id))
+        conn.commit()
+        conn.close()
+        
+        if errors:
+            return {'success': False, 'error': f'Sent {emails_sent}, failed: {"; ".join(errors)}'}
+        
+        return {'success': True, 'message': f'Workflow restart email sent to {emails_sent} reviewer(s)'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        pythoncom.CoUninitialize()
+
 
 def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     """Send assignment email to the QCR with magic link or file-based form."""
@@ -8021,6 +8774,13 @@ def api_close_item(item_id):
     updated_item = dict(cursor.fetchone())
     conn.close()
     
+    # Update RFI Bulletin Tracker Excel if this is an RFI
+    excel_result = update_rfi_tracker_excel(updated_item, action='close')
+    if excel_result.get('success'):
+        updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
+    elif excel_result.get('error'):
+        updated_item['excel_update_error'] = excel_result.get('error')
+    
     return jsonify(updated_item)
 
 @app.route('/api/item/<int:item_id>/reopen', methods=['POST'])
@@ -8050,6 +8810,13 @@ def api_reopen_item(item_id):
     cursor.execute('SELECT * FROM item WHERE id = ?', (item_id,))
     updated_item = dict(cursor.fetchone())
     conn.close()
+    
+    # Update RFI Bulletin Tracker Excel if this is an RFI
+    excel_result = update_rfi_tracker_excel(updated_item, action='reopen')
+    if excel_result.get('success'):
+        updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
+    elif excel_result.get('error'):
+        updated_item['excel_update_error'] = excel_result.get('error')
     
     return jsonify(updated_item)
 
@@ -9002,6 +9769,305 @@ def api_send_multi_reviewer_qcr_email(item_id):
             return jsonify(result), 400
     except Exception as e:
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+# =============================================================================
+# CONTRACTOR UPDATE REVIEW API ENDPOINTS
+# =============================================================================
+
+@app.route('/api/pending-updates', methods=['GET'])
+@admin_required
+def api_get_pending_updates():
+    """Get all items with pending contractor updates that need admin review."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT i.id, i.type, i.identifier, i.title, i.status, i.due_date,
+               i.has_pending_update, i.update_type, i.update_detected_at,
+               i.previous_due_date, i.previous_title, i.previous_priority,
+               i.update_email_body, i.reopened_from_closed, i.status_before_update,
+               i.reviewer_response_status, i.qcr_response_status,
+               ir.display_name as reviewer_name,
+               qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.has_pending_update = 1
+        ORDER BY i.update_detected_at DESC
+    ''')
+    items = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify(items)
+
+@app.route('/api/item/<int:item_id>/update-history', methods=['GET'])
+@login_required
+def api_get_item_update_history(item_id):
+    """Get the update history for an item."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT uh.*, u.display_name as reviewed_by_name
+        FROM item_update_history uh
+        LEFT JOIN user u ON uh.admin_reviewed_by = u.id
+        WHERE uh.item_id = ?
+        ORDER BY uh.detected_at DESC
+    ''', (item_id,))
+    history = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify(history)
+
+@app.route('/api/item/<int:item_id>/review-update', methods=['POST'])
+@admin_required
+def api_review_update(item_id):
+    """Admin reviews a contractor update and decides on action.
+    
+    Actions:
+    - 'accept_due_date': Just update the due dates, notify appropriate parties
+    - 'restart_workflow': Content changed, restart to reviewer with note
+    - 'dismiss': Dismiss the update without action
+    """
+    data = request.get_json()
+    action = data.get('action')  # 'accept_due_date', 'restart_workflow', 'dismiss'
+    admin_note = data.get('admin_note', '')
+    apply_new_values = data.get('apply_new_values', True)  # Whether to apply the new due_date/title/priority
+    
+    if action not in ('accept_due_date', 'restart_workflow', 'dismiss'):
+        return jsonify({'error': 'Invalid action'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item details
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return jsonify({'error': 'Item not found'}), 404
+    
+    if not item['has_pending_update']:
+        conn.close()
+        return jsonify({'error': 'No pending update for this item'}), 400
+    
+    # Get the latest update history entry
+    cursor.execute('''
+        SELECT * FROM item_update_history
+        WHERE item_id = ? AND admin_reviewed_at IS NULL
+        ORDER BY detected_at DESC LIMIT 1
+    ''', (item_id,))
+    update_history = cursor.fetchone()
+    
+    now = datetime.now().isoformat()
+    admin_user_id = session.get('user_id')
+    result = {'success': True, 'action': action, 'emails_sent': []}
+    
+    if action == 'dismiss':
+        # Just clear the update flag without changing anything
+        cursor.execute('''
+            UPDATE item SET
+                has_pending_update = 0,
+                update_type = NULL,
+                update_reviewed_at = ?,
+                update_admin_note = ?
+            WHERE id = ?
+        ''', (now, admin_note, item_id))
+        
+        if update_history:
+            cursor.execute('''
+                UPDATE item_update_history SET
+                    admin_reviewed_at = ?,
+                    admin_reviewed_by = ?,
+                    admin_note = ?,
+                    action_taken = 'dismissed'
+                WHERE id = ?
+            ''', (now, admin_user_id, admin_note, update_history['id']))
+        
+    elif action == 'accept_due_date':
+        # Apply new due date and notify appropriate parties
+        updates = ['has_pending_update = 0', 'update_type = NULL', 
+                   'update_reviewed_at = ?', 'update_admin_note = ?']
+        params = [now, admin_note]
+        
+        if apply_new_values and update_history:
+            if update_history['new_due_date']:
+                updates.append('due_date = ?')
+                params.append(update_history['new_due_date'])
+                
+                # Recalculate review due dates
+                date_received = item['date_received']
+                priority = update_history['new_priority'] or item['priority']
+                if date_received:
+                    due_dates = calculate_review_due_dates(
+                        date_received, update_history['new_due_date'], priority
+                    )
+                    updates.extend([
+                        'initial_reviewer_due_date = ?',
+                        'qcr_due_date = ?',
+                        'is_contractor_window_insufficient = ?'
+                    ])
+                    params.extend([
+                        due_dates['initial_reviewer_due_date'],
+                        due_dates['qcr_due_date'],
+                        1 if due_dates['is_contractor_window_insufficient'] else 0
+                    ])
+            
+            if update_history['new_priority']:
+                updates.append('priority = ?')
+                params.append(update_history['new_priority'])
+        
+        params.append(item_id)
+        cursor.execute(f'''
+            UPDATE item SET {', '.join(updates)} WHERE id = ?
+        ''', params)
+        
+        if update_history:
+            cursor.execute('''
+                UPDATE item_update_history SET
+                    admin_reviewed_at = ?,
+                    admin_reviewed_by = ?,
+                    admin_note = ?,
+                    action_taken = 'due_date_accepted'
+                WHERE id = ?
+            ''', (now, admin_user_id, admin_note, update_history['id']))
+        
+        # Send due date update notification based on workflow status
+        reviewer_status = item['reviewer_response_status']
+        qcr_status = item['qcr_response_status']
+        
+        new_due_date = update_history['new_due_date'] if update_history else item['due_date']
+        was_reopened = item['reopened_from_closed']
+        
+        if qcr_status == 'Email Sent' and item['qcr_email']:
+            # QCR has the ball - notify only QCR
+            email_result = send_due_date_update_email(
+                item_id, 'qcr', new_due_date, admin_note, was_reopened
+            )
+            result['emails_sent'].append({'to': 'qcr', 'result': email_result})
+        elif reviewer_status == 'Email Sent' and item['reviewer_email']:
+            # Reviewer has the ball - notify reviewer
+            email_result = send_due_date_update_email(
+                item_id, 'reviewer', new_due_date, admin_note, was_reopened
+            )
+            result['emails_sent'].append({'to': 'reviewer', 'result': email_result})
+        
+    elif action == 'restart_workflow':
+        # Content changed - restart to reviewer
+        # First, if item was closed, reopen it
+        updates = [
+            'has_pending_update = 0', 'update_type = NULL',
+            'update_reviewed_at = ?', 'update_admin_note = ?',
+            'status = ?',
+            'reviewer_response_status = NULL', 'reviewer_response_at = NULL',
+            'reviewer_response_category = NULL', 'reviewer_notes = NULL',
+            'reviewer_selected_files = NULL', 'reviewer_response_text = NULL',
+            'qcr_response_status = NULL', 'qcr_response_at = NULL',
+            'qcr_action = NULL', 'qcr_response_mode = NULL',
+            'qcr_notes = NULL', 'qcr_selected_files = NULL',
+            'final_response_category = NULL', 'final_response_text = NULL',
+            'final_response_files = NULL'
+        ]
+        params = [now, admin_note, 'Assigned']
+        
+        # Clear closed_at if it was closed
+        if item['closed_at']:
+            updates.append('closed_at = NULL')
+        
+        # Apply new values if requested
+        if apply_new_values and update_history:
+            if update_history['new_due_date']:
+                updates.append('due_date = ?')
+                params.append(update_history['new_due_date'])
+                
+                # Recalculate review due dates
+                date_received = item['date_received']
+                priority = update_history['new_priority'] or item['priority']
+                if date_received:
+                    due_dates = calculate_review_due_dates(
+                        date_received, update_history['new_due_date'], priority
+                    )
+                    updates.extend([
+                        'initial_reviewer_due_date = ?',
+                        'qcr_due_date = ?',
+                        'is_contractor_window_insufficient = ?'
+                    ])
+                    params.extend([
+                        due_dates['initial_reviewer_due_date'],
+                        due_dates['qcr_due_date'],
+                        1 if due_dates['is_contractor_window_insufficient'] else 0
+                    ])
+            
+            if update_history['new_title']:
+                updates.append('title = ?')
+                params.append(update_history['new_title'])
+            
+            if update_history['new_priority']:
+                updates.append('priority = ?')
+                params.append(update_history['new_priority'])
+        
+        params.append(item_id)
+        cursor.execute(f'''
+            UPDATE item SET {', '.join(updates)} WHERE id = ?
+        ''', params)
+        
+        # Clear multi-reviewer responses if applicable
+        cursor.execute('''
+            UPDATE item_reviewers SET
+                response_at = NULL,
+                response_category = NULL,
+                internal_notes = NULL,
+                needs_response = 1
+            WHERE item_id = ?
+        ''', (item_id,))
+        
+        if update_history:
+            cursor.execute('''
+                UPDATE item_update_history SET
+                    admin_reviewed_at = ?,
+                    admin_reviewed_by = ?,
+                    admin_note = ?,
+                    action_taken = 'workflow_restarted'
+                WHERE id = ?
+            ''', (now, admin_user_id, admin_note, update_history['id']))
+        
+        # Send restart notification to reviewer(s)
+        was_closed = item['reopened_from_closed']
+        email_result = send_workflow_restart_email(
+            item_id, admin_note, was_closed
+        )
+        result['emails_sent'].append({'to': 'reviewer', 'result': email_result})
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify(result)
+
+@app.route('/api/item/<int:item_id>/clear-update-flag', methods=['POST'])
+@admin_required
+def api_clear_update_flag(item_id):
+    """Manually clear the pending update flag without taking action."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        UPDATE item SET
+            has_pending_update = 0,
+            update_type = NULL,
+            update_reviewed_at = ?,
+            update_admin_note = 'Manually cleared'
+        WHERE id = ?
+    ''', (datetime.now().isoformat(), item_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True})
 
 # =============================================================================
 # MULTI-REVIEWER API ENDPOINTS

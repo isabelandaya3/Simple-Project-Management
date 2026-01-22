@@ -2980,3 +2980,283 @@ tr.insufficient-warning:hover {
 .empty-reminder-state p {
     margin: 0;
 }
+
+/* =============================================================================
+   Contractor Update Styles
+   ============================================================================= */
+
+/* Highlight row with pending update */
+.pending-update-row {
+    background: linear-gradient(90deg, #fef3c7 0%, #fffbeb 100%) !important;
+    border-left: 4px solid #f59e0b !important;
+}
+
+.pending-update-row:hover {
+    background: linear-gradient(90deg, #fde68a 0%, #fef3c7 100%) !important;
+}
+
+/* Update badge icon */
+.update-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.875rem;
+    margin-right: 0.375rem;
+    animation: pulse-update 2s ease-in-out infinite;
+}
+
+@keyframes pulse-update {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(1.1); }
+}
+
+/* Update review panel in drawer */
+.update-review-panel {
+    background: linear-gradient(135deg, #fef3c7 0%, #fffbeb 100%);
+    border: 2px solid #f59e0b;
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.update-review-panel.content-change {
+    background: linear-gradient(135deg, #fee2e2 0%, #fef2f2 100%);
+    border-color: #ef4444;
+}
+
+.update-review-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: #92400e;
+    margin-bottom: 0.75rem;
+}
+
+.update-review-panel.content-change .update-review-header {
+    color: #dc2626;
+}
+
+.update-review-header .icon {
+    font-size: 1.25rem;
+}
+
+.update-changes {
+    background: white;
+    border-radius: var(--border-radius-sm);
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.8125rem;
+}
+
+.update-change-item {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.update-change-item .label {
+    font-weight: 500;
+    color: var(--text-secondary);
+    min-width: 100px;
+}
+
+.update-change-item .old-value {
+    color: #dc2626;
+    text-decoration: line-through;
+}
+
+.update-change-item .arrow {
+    color: var(--text-muted);
+}
+
+.update-change-item .new-value {
+    color: #059669;
+    font-weight: 600;
+}
+
+.update-admin-note {
+    margin-bottom: 0.75rem;
+}
+
+.update-admin-note textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    font-size: 0.8125rem;
+    resize: vertical;
+    min-height: 60px;
+}
+
+.update-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.update-actions .btn {
+    font-size: 0.8125rem;
+    padding: 0.5rem 0.75rem;
+}
+
+.btn-accept-due-date {
+    background: #3b82f6;
+    color: white;
+}
+
+.btn-accept-due-date:hover {
+    background: #2563eb;
+}
+
+.btn-restart-workflow {
+    background: #f59e0b;
+    color: white;
+}
+
+.btn-restart-workflow:hover {
+    background: #d97706;
+}
+
+.btn-dismiss-update {
+    background: var(--color-gray-200);
+    color: var(--text-secondary);
+}
+
+.btn-dismiss-update:hover {
+    background: var(--color-gray-300);
+}
+
+/* Pending updates nav badge */
+.pending-updates-badge {
+    background: #f59e0b;
+    color: white;
+    font-size: 0.6875rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: 999px;
+    margin-left: auto;
+    animation: pulse-update 2s ease-in-out infinite;
+}
+
+/* =============================================================================
+   Pending Updates View
+   ============================================================================= */
+
+.pending-updates-container {
+    padding: 1.5rem;
+    max-width: 1200px;
+}
+
+.pending-updates-header {
+    margin-bottom: 1.5rem;
+}
+
+.pending-updates-header h2 {
+    font-size: 1.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.pending-updates-header p {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.pending-updates-actions {
+    margin-top: 0.75rem;
+}
+
+.pending-updates-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.pending-update-card {
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    transition: box-shadow var(--transition);
+}
+
+.pending-update-card:hover {
+    box-shadow: var(--shadow);
+}
+
+.pending-update-card.due-date-only {
+    border-left: 4px solid #3b82f6;
+}
+
+.pending-update-card.content-change {
+    border-left: 4px solid #f59e0b;
+    background: linear-gradient(90deg, #fffbeb 0%, white 100%);
+}
+
+.update-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 0.75rem;
+}
+
+.update-card-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.update-card-type {
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--border-radius-sm);
+    background: var(--bg-tertiary);
+}
+
+.pending-update-card.content-change .update-card-type {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.pending-update-card.due-date-only .update-card-type {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.reopened-badge {
+    background: #dc2626;
+    color: white;
+    font-size: 0.625rem;
+    padding: 0.125rem 0.375rem;
+    border-radius: var(--border-radius-sm);
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.update-card-body {
+    margin-bottom: 0.75rem;
+}
+
+.update-card-title-text {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+}
+
+.update-card-changes {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.update-card-meta {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+}
+
+.update-card-actions {
+    display: flex;
+    justify-content: flex-end;
+}
