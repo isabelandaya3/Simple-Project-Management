@@ -654,10 +654,10 @@ function populateDetailDrawer(item) {
     const rfiQuestionInput = document.getElementById('detail-rfi-question');
     if (item.type === 'RFI') {
         rfiQuestionInput.value = item.rfi_question || '';
-        show(rfiQuestionSection);
+        rfiQuestionSection.classList.remove('hidden');
     } else {
         rfiQuestionInput.value = '';
-        hide(rfiQuestionSection);
+        rfiQuestionSection.classList.add('hidden');
     }
     
     // Reviewer fields
