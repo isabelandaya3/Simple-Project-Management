@@ -649,6 +649,17 @@ function populateDetailDrawer(item) {
     document.getElementById('detail-folder').value = item.folder_link || '';
     document.getElementById('detail-notes').value = item.notes || '';
     
+    // RFI Question field - show only for RFI type
+    const rfiQuestionSection = document.getElementById('rfi-question-section');
+    const rfiQuestionInput = document.getElementById('detail-rfi-question');
+    if (item.type === 'RFI') {
+        rfiQuestionInput.value = item.rfi_question || '';
+        show(rfiQuestionSection);
+    } else {
+        rfiQuestionInput.value = '';
+        hide(rfiQuestionSection);
+    }
+    
     // Reviewer fields
     document.getElementById('detail-initial-reviewer').value = item.initial_reviewer_id || '';
     document.getElementById('detail-qcr').value = item.qcr_id || '';
@@ -802,7 +813,8 @@ async function saveItem() {
         qcr_id: qcrId || null,
         initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
         qcr_due_date: document.getElementById('detail-qcr-due').value || null,
-        notes: document.getElementById('detail-notes').value
+        notes: document.getElementById('detail-notes').value,
+        rfi_question: document.getElementById('detail-rfi-question').value
     };
     
     try {

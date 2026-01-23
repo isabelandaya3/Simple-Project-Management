@@ -2152,6 +2152,12 @@ def init_db():
     except:
         pass
     
+    # Add rfi_question column to item table
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN rfi_question TEXT')
+    except:
+        pass
+    
     # Notification table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS notification (
@@ -6711,6 +6717,9 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Convert to dict for easier handling
+    item = dict(item)
+    
     if not item['folder_link']:
         conn.close()
         return {'success': False, 'error': 'Item has no folder assigned'}
@@ -6751,7 +6760,9 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
             {other_reviewers_rows}
         </div>'''
     
-    # Load appropriate template based on reviewer count
+    # Load appropriate template based on item type and reviewer count
+    item_type = (item['type'] or '').upper()
+    
     if is_multi_reviewer:
         # Multi-reviewer: use multi-reviewer specific template (no file selection, Bluebeam focused)
         template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_RESPONSE_TEMPLATE.hta"
@@ -6763,12 +6774,19 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
                 if not template_path.exists():
                     return {'success': False, 'error': 'Multi-reviewer form template not found'}
     else:
-        # Single reviewer: use regular single-reviewer template (with file selection)
-        template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
-        if not template_path.exists():
-            template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
+        # Single reviewer: check if RFI or Submittal
+        if item_type == 'RFI':
+            # RFI: use RFI-specific template (no response category, different labels)
+            template_path = TEMPLATES_DIR / "_RFI_RESPONSE_FORM_TEMPLATE.hta"
             if not template_path.exists():
-                return {'success': False, 'error': 'Reviewer form template not found'}
+                return {'success': False, 'error': 'RFI form template not found'}
+        else:
+            # Submittal: use regular single-reviewer template (with file selection and response category)
+            template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
+            if not template_path.exists():
+                template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
+                if not template_path.exists():
+                    return {'success': False, 'error': 'Reviewer form template not found'}
     
     with open(template_path, 'r', encoding='utf-8') as f:
         template = f.read()
@@ -6793,6 +6811,7 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
     html = html.replace('{{TOKEN}}', reviewer_record['email_token'] or '')
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
     html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or 'N/A'))
     html = html.replace('{{OTHER_REVIEWERS_SECTION}}', other_reviewers_html)
     
     # Save to Responses subfolder with reviewer-specific name
@@ -6855,6 +6874,16 @@ def send_multi_reviewer_assignment_emails(item_id):
         conn.close()
         return {'success': False, 'error': 'No reviewers assigned'}
     
+    # Check if single reviewer mode (for email language)
+    is_single_reviewer = len(reviewers) == 1
+    
+    # Ensure multi_reviewer_mode flag is correct based on actual count
+    correct_mode = 0 if is_single_reviewer else 1
+    if item['multi_reviewer_mode'] != correct_mode:
+        cursor.execute('UPDATE item SET multi_reviewer_mode = ? WHERE id = ?', (correct_mode, item_id))
+        conn.commit()
+        print(f"  [Send Emails] Corrected multi_reviewer_mode to {correct_mode} for item {item_id} ({len(reviewers)} reviewers)")
+    
     # Calculate due dates if needed
     reviewer_due_date = item['initial_reviewer_due_date']
     qcr_due_date = item['qcr_due_date']
@@ -6882,9 +6911,6 @@ def send_multi_reviewer_assignment_emails(item_id):
     
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
-    
-    # Check if single reviewer mode (for email language)
-    is_single_reviewer = len(reviewers) == 1
     
     # Build list of all reviewer names for email display (each on new line) - only needed for multi-reviewer
     all_reviewer_names = "<br>".join([r['reviewer_name'] for r in reviewers]) if not is_single_reviewer else ""
@@ -6919,6 +6945,16 @@ def send_multi_reviewer_assignment_emails(item_id):
             
             subject = f"[LEB] {item['identifier']} – Assigned to You"
             
+            # Build RFI Question section if applicable
+            rfi_question_html = ""
+            if (item['type'] or '').upper() == 'RFI' and item.get('rfi_question'):
+                rfi_question_html = f"""
+    <!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#fff8e1; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:14px; color:#f57c00; font-weight:bold; margin-bottom:8px;">❓ RFI Question</div>
+        <div style="font-size:13px; color:#333; line-height:1.6; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>"""
+            
             if use_file_form:
                 # Generate the HTA form file for this reviewer
                 form_result = generate_multi_reviewer_form(item_id, dict(reviewer))
@@ -6936,6 +6972,8 @@ def send_multi_reviewer_assignment_emails(item_id):
     <p style="margin-top:0; font-size:13px; color:#666;">
         You have been assigned a new review task. Please review the details below.
     </p>
+
+    {rfi_question_html}
 
     <!-- BLUEBEAM INSTRUCTIONS -->
     <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
@@ -7143,7 +7181,9 @@ def send_multi_reviewer_assignment_emails(item_id):
                 outlook = win32com.client.Dispatch("Outlook.Application")
                 mail = outlook.CreateItem(0)
                 mail.To = reviewer['reviewer_email']
-                # Note: QCR gets their own separate notification email instead of being CC'd
+                # CC the QCR only for single reviewer (multi-reviewer gets separate notification)
+                if item['qcr_email'] and is_single_reviewer:
+                    mail.CC = item['qcr_email']
                 mail.Subject = subject
                 mail.HTMLBody = html_body
                 mail.Send()
@@ -7161,24 +7201,13 @@ def send_multi_reviewer_assignment_emails(item_id):
         except Exception as e:
             errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
     
-    # Send separate notification email to QCR
+    # Send separate notification email to QCR (only for multi-reviewer)
     qcr_email_sent = False
-    if item['qcr_email'] and sent_count > 0:
+    if item['qcr_email'] and sent_count > 0 and not is_single_reviewer:
         try:
-            is_single_reviewer = len(reviewers) == 1
             reviewer_names_list = "<br>".join([f"• {r['reviewer_name']}" for r in reviewers])
             
             qcr_subject = f"[LEB] {item['identifier']} – Assigned to You for QC Review"
-            
-            # Use singular language when there's only 1 reviewer
-            if is_single_reviewer:
-                notified_text = "You will be notified once the reviewer has submitted their response."
-                assigned_text = "The initial reviewer listed below has been notified and is currently working on their response."
-                reviewer_header = "👤 Assigned Reviewer"
-            else:
-                notified_text = "You will be notified once all reviewers have submitted their responses."
-                assigned_text = "The initial reviewers listed below have been notified and are currently working on their responses."
-                reviewer_header = f"👥 Assigned Reviewers ({len(reviewers)})"
             
             qcr_html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.6;">
 
@@ -7186,14 +7215,14 @@ def send_multi_reviewer_assignment_emails(item_id):
     
     <div style="background:#dbeafe; border:1px solid #3b82f6; border-radius:8px; padding:15px; margin:15px 0;">
         <p style="margin:0; font-size:14px; color:#1e40af;">
-            <strong>📋 {notified_text}</strong>
+            <strong>📋 You will be notified once all reviewers have submitted their responses.</strong>
         </p>
     </div>
     
-    <p>You have been assigned as the <strong>QC Reviewer</strong> for the following item. {assigned_text}</p>
+    <p>You have been assigned as the <strong>QC Reviewer</strong> for the following item. The initial reviewers listed below have been notified and are currently working on their responses.</p>
     
     <div style="background:#f8fafc; border-radius:8px; padding:15px; margin:15px 0; border:1px solid #e5e7eb;">
-        <h4 style="margin:0 0 10px 0; color:#374151;">{reviewer_header}</h4>
+        <h4 style="margin:0 0 10px 0; color:#374151;">👥 Assigned Reviewers ({len(reviewers)})</h4>
         <div style="color:#4b5563;">
             {reviewer_names_list}
         </div>
@@ -7236,7 +7265,7 @@ def send_multi_reviewer_assignment_emails(item_id):
     </table>
     
     <p style="margin-top:20px; font-size:13px; color:#666;">
-        {'Once the reviewer has submitted their response' if is_single_reviewer else 'Once all reviewers have submitted their responses'}, you will receive another email with a link to complete your QC review.
+        Once all reviewers have submitted their responses, you will receive another email with a link to complete your QC review.
     </p>
     
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -7275,12 +7304,15 @@ def send_multi_reviewer_assignment_emails(item_id):
         return {
             'success': sent_count > 0,
             'sent_count': sent_count,
-            'qcr_notified': qcr_email_sent,
+            'qcr_notified': qcr_email_sent if not is_single_reviewer else True,
             'errors': errors,
             'message': f'Sent {sent_count} reviewer emails with {len(errors)} errors'
         }
     
-    return {'success': True, 'sent_count': sent_count, 'qcr_notified': qcr_email_sent, 'message': f'Sent {sent_count} reviewer emails + QCR notification'}
+    if is_single_reviewer:
+        return {'success': True, 'sent_count': sent_count, 'qcr_notified': True, 'message': f'Sent {sent_count} reviewer email (QCR CC\'d)'}
+    else:
+        return {'success': True, 'sent_count': sent_count, 'qcr_notified': qcr_email_sent, 'message': f'Sent {sent_count} reviewer emails + separate QCR notification'}
 
 
 def generate_multi_reviewer_qcr_form(item_id):
@@ -7306,6 +7338,9 @@ def generate_multi_reviewer_qcr_form(item_id):
     if not item:
         conn.close()
         return {'success': False, 'error': 'Item not found'}
+    
+    # Convert to dict for easier handling
+    item = dict(item)
     
     if not item['folder_link']:
         conn.close()
@@ -7431,6 +7466,7 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']))
     html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or 'N/A'))
     html = html.replace('{{TOKEN}}', item['email_token_qcr'] or '')
     
     # Save to item folder
@@ -8357,7 +8393,7 @@ def api_get_items():
         SELECT i.*, 
                u.display_name as assigned_to_name,
                CASE 
-                   WHEN i.multi_reviewer_mode = 1 THEN (
+                   WHEN EXISTS (SELECT 1 FROM item_reviewers WHERE item_id = i.id) THEN (
                        SELECT GROUP_CONCAT(reviewer_name, ', ') 
                        FROM item_reviewers 
                        WHERE item_id = i.id
@@ -8412,7 +8448,7 @@ def api_get_item(item_id):
         SELECT i.*, 
                u.display_name as assigned_to_name,
                CASE 
-                   WHEN i.multi_reviewer_mode = 1 THEN (
+                   WHEN EXISTS (SELECT 1 FROM item_reviewers WHERE item_id = i.id) THEN (
                        SELECT GROUP_CONCAT(reviewer_name, ', ') 
                        FROM item_reviewers 
                        WHERE item_id = i.id
@@ -8462,7 +8498,7 @@ def api_update_item(item_id):
     allowed_fields = [
         'title', 'due_date', 'priority', 'status', 'assigned_to_user_id', 'notes', 'folder_link',
         'initial_reviewer_id', 'qcr_id', 'date_received',
-        'initial_reviewer_due_date', 'qcr_due_date'
+        'initial_reviewer_due_date', 'qcr_due_date', 'rfi_question'
     ]
     updates = []
     params = []

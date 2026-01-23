@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>RFI Response - {{ITEM_IDENTIFIER}}</title>
+    <HTA:APPLICATION
+        ID="RFIResponseForm"
+        APPLICATIONNAME="RFI Response"
+        BORDER="dialog"
+        BORDERSTYLE="normal"
+        CAPTION="yes"
+        CONTEXTMENU="yes"
+        MAXIMIZEBUTTON="yes"
+        MINIMIZEBUTTON="yes"
+        SCROLL="yes"
+        SCROLLFLAT="yes"
+        SELECTION="yes"
+        SHOWINTASKBAR="yes"
+        SINGLEINSTANCE="no"
+        SYSMENU="yes"
+        VERSION="1.0"
+        WINDOWSTATE="normal"
+    />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+        }
+        h1 {
+            color: #1a1a2e;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .info-row {
+            display: flex;
+            margin-bottom: 8px;
+        }
+        .info-row:last-child { margin-bottom: 0; }
+        .info-label {
+            font-weight: 600;
+            color: #444;
+            width: 160px;
+            flex-shrink: 0;
+        }
+        .info-value { color: #666; }
+        
+        .rfi-question-box {
+            background: #fff8e1;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .rfi-question-box h3 {
+            color: #f57c00;
+            font-size: 14px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .rfi-question-text {
+            color: #333;
+            font-size: 14px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+        
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin-bottom: 12px;
+        }
+        .form-group { margin-bottom: 20px; }
+        label {
+            display: block;
+            font-weight: 500;
+            color: #444;
+            margin-bottom: 6px;
+        }
+        select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        }
+        textarea { resize: vertical; min-height: 120px; }
+        
+        .file-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .file-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 10px;
+            background: white;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .file-item:last-child { border-bottom: none; }
+        .file-item input[type="checkbox"] {
+            margin-right: 10px;
+            width: 18px;
+            height: 18px;
+        }
+        .file-item label {
+            margin: 0;
+            font-weight: normal;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        .btn:hover {
+            opacity: 0.9;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .success-box {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            color: #155724;
+            text-align: center;
+        }
+        .hidden { display: none !important; }
+        .folder-info {
+            background: #e8f4f8;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 24px;
+            font-size: 13px;
+        }
+        .folder-path {
+            color: #0066cc;
+            background: #f8f9fa;
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+            display: block;
+        }
+        .open-folder-btn {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .open-folder-btn:hover { background: #138496; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RFI Response</h1>
+        <p class="subtitle">{{ITEM_IDENTIFIER}}</p>
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">{{ITEM_TITLE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">{{DATE_RECEIVED}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Your Due Date:</span>
+                <span class="info-value" style="color: #2980b9; font-weight: bold;">{{REVIEWER_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QCR Due Date:</span>
+                <span class="info-value">{{QCR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">{{CONTRACTOR_DUE_DATE}}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Reviewer:</span>
+                <span class="info-value">{{REVIEWER_NAME}}</span>
+            </div>
+        </div>
+
+        <div class="rfi-question-box">
+            <h3>❓ RFI Question</h3>
+            <div class="rfi-question-text">{{RFI_QUESTION}}</div>
+        </div>
+
+        <div class="folder-info">
+            <strong>Item Folder:</strong>
+            <span class="folder-path" id="folder-path">{{FOLDER_PATH_RAW}}</span>
+            <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
+        </div>
+
+        <div id="success-message" class="success-box hidden"></div>
+
+        <form id="response-form">
+            <div class="form-group">
+                <p class="section-title">Files to Include in Response</p>
+                <div class="file-section">
+                    <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+                        Select PDF files from the item folder to include with your response.
+                    </p>
+                    
+                    <div class="file-list" id="file-list">
+                        <p style="color: #888; padding: 8px; text-align: center;">Loading files...</p>
+                    </div>
+                    
+                    <button type="button" onclick="loadFolderFiles()" style="margin-top: 10px; padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;">Refresh File List</button>
+                    <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="notes">Response *</label>
+                <textarea name="notes" id="notes" placeholder="Provide your response to the RFI question..." required></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="internal_notes" id="internal_notes" placeholder="Add any internal notes for the QC Reviewer..."></textarea>
+            </div>
+            
+            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Submit RFI Response</button>
+        </form>
+    </div>
+
+    <script language="JavaScript">
+        var ITEM_CONFIG = {
+            item_id: {{ITEM_ID}},
+            item_type: "{{ITEM_TYPE}}",
+            identifier: "{{ITEM_IDENTIFIER}}",
+            title: "{{ITEM_TITLE}}",
+            token: "{{TOKEN}}",
+            reviewer_name: "{{REVIEWER_NAME}}",
+            reviewer_email: "{{REVIEWER_EMAIL}}",
+            folder_path: "{{FOLDER_PATH}}"
+        };
+
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var shell = new ActiveXObject("WScript.Shell");
+
+        function openFolder() {
+            try {
+                shell.Run('explorer.exe "' + ITEM_CONFIG.folder_path + '"');
+            } catch(e) {
+                alert('Error opening folder: ' + e.message);
+            }
+        }
+
+        function loadFolderFiles() {
+            var fileListDiv = document.getElementById('file-list');
+            
+            try {
+                if (!fso.FolderExists(ITEM_CONFIG.folder_path)) {
+                    fileListDiv.innerHTML = '<p style="color: #d32f2f; padding: 8px;">Folder not found</p>';
+                    return;
+                }
+                
+                var folder = fso.GetFolder(ITEM_CONFIG.folder_path);
+                var files = new Enumerator(folder.Files);
+                var html = '';
+                var count = 0;
+                
+                for (; !files.atEnd(); files.moveNext()) {
+                    var file = files.item();
+                    var ext = fso.GetExtensionName(file.Name).toLowerCase();
+                    // Only show PDFs, exclude system files starting with _ or ~
+                    if (ext === "pdf" && file.Name.charAt(0) !== "_" && file.Name.charAt(0) !== "~") {
+                        html += "<div class='file-item'>" +
+                            "<input type='checkbox' name='selected_files' value='" + file.Name + "' id='file_" + count + "'>" +
+                            "<label for='file_" + count + "'>" + file.Name + "</label>" +
+                            "</div>";
+                        count++;
+                    }
+                }
+                
+                if (count === 0) {
+                    html = '<p style="color: #888; padding: 8px; text-align: center;">No PDF files found in folder</p>';
+                }
+                
+                fileListDiv.innerHTML = html;
+            } catch(e) {
+                fileListDiv.innerHTML = '<p style="color: #d32f2f; padding: 8px;">Error loading files: ' + e.message + '</p>';
+            }
+        }
+
+        function submitResponse() {
+            var notes = document.getElementById('notes').value;
+            var internalNotes = document.getElementById('internal_notes').value;
+            
+            if (!notes || notes.trim() === '') {
+                alert('Please provide a response.');
+                return;
+            }
+            
+            // Collect selected files
+            var checkboxes = document.getElementsByName('selected_files');
+            var selectedFiles = [];
+            for (var i = 0; i < checkboxes.length; i++) {
+                if (checkboxes[i].checked) {
+                    selectedFiles.push(checkboxes[i].value);
+                }
+            }
+            
+            // Build response object - RFI format (no category)
+            var response = {
+                _form_type: "rfi_response",
+                _version: "1.0",
+                _submitted_at: new Date().toISOString(),
+                item_id: ITEM_CONFIG.item_id,
+                identifier: ITEM_CONFIG.identifier,
+                token: ITEM_CONFIG.token,
+                reviewer_name: ITEM_CONFIG.reviewer_name,
+                reviewer_email: ITEM_CONFIG.reviewer_email,
+                response_text: notes,
+                internal_notes: internalNotes,
+                selected_files: selectedFiles
+            };
+            
+            // Save JSON file
+            var timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            var jsonFileName = "_RESPONSE_" + timestamp + ".json";
+            var jsonPath = ITEM_CONFIG.folder_path + "\\Responses\\" + jsonFileName;
+            
+            try {
+                // Create Responses folder if it doesn't exist
+                var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+                if (!fso.FolderExists(responsesFolder)) {
+                    fso.CreateFolder(responsesFolder);
+                }
+                
+                // Write JSON file
+                var jsonFile = fso.CreateTextFile(jsonPath, true);
+                jsonFile.Write(JSON.stringify(response, null, 2));
+                jsonFile.Close();
+                
+                // Show success message
+                document.getElementById('response-form').classList.add('hidden');
+                var successBox = document.getElementById('success-message');
+                successBox.innerHTML = '<h2 style="color: #155724; margin-bottom: 10px;">✅ RFI Response Submitted!</h2>' +
+                    '<p>Your response has been saved successfully. The QC Reviewer will be notified.</p>' +
+                    '<p style="margin-top: 10px;"><small>You can now close this window.</small></p>';
+                successBox.classList.remove('hidden');
+            } catch(e) {
+                alert('Error saving response: ' + e.message);
+            }
+        }
+
+        // Load files on page load
+        window.onload = function() {
+            loadFolderFiles();
+        };
+    </script>
+</body>
+</html>
