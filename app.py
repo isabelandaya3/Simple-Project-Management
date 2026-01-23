@@ -6724,9 +6724,12 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
     reviewer_due = item['initial_reviewer_due_date'] or 'N/A'
     qcr_due = item['qcr_due_date'] or 'N/A'
     
-    # Build other reviewers status section
+    # Check if this is truly multi-reviewer (more than 1 reviewer)
+    is_multi_reviewer = len(all_reviewers) > 1
+    
+    # Build other reviewers status section (only for multi-reviewer)
     other_reviewers_html = ""
-    if len(all_reviewers) > 1:
+    if is_multi_reviewer:
         other_reviewers_rows = ""
         for r in all_reviewers:
             is_current = r['reviewer_email'] == reviewer_record['reviewer_email']
@@ -6748,15 +6751,24 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
             {other_reviewers_rows}
         </div>'''
     
-    # Load multi-reviewer specific template (no file selection, Bluebeam focused)
-    template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_RESPONSE_TEMPLATE.hta"
-    if not template_path.exists():
-        # Fallback to regular template if multi-reviewer specific doesn't exist
+    # Load appropriate template based on reviewer count
+    if is_multi_reviewer:
+        # Multi-reviewer: use multi-reviewer specific template (no file selection, Bluebeam focused)
+        template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_RESPONSE_TEMPLATE.hta"
+        if not template_path.exists():
+            # Fallback to regular template
+            template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
+            if not template_path.exists():
+                template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
+                if not template_path.exists():
+                    return {'success': False, 'error': 'Multi-reviewer form template not found'}
+    else:
+        # Single reviewer: use regular single-reviewer template (with file selection)
         template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.hta"
         if not template_path.exists():
             template_path = TEMPLATES_DIR / "_RESPONSE_FORM_TEMPLATE_v3.html"
             if not template_path.exists():
-                return {'success': False, 'error': 'Multi-reviewer form template not found'}
+                return {'success': False, 'error': 'Reviewer form template not found'}
     
     with open(template_path, 'r', encoding='utf-8') as f:
         template = f.read()
@@ -6871,8 +6883,20 @@ def send_multi_reviewer_assignment_emails(item_id):
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
     
-    # Build list of all reviewer names for email display (each on new line)
-    all_reviewer_names = "<br>".join([r['reviewer_name'] for r in reviewers])
+    # Check if single reviewer mode (for email language)
+    is_single_reviewer = len(reviewers) == 1
+    
+    # Build list of all reviewer names for email display (each on new line) - only needed for multi-reviewer
+    all_reviewer_names = "<br>".join([r['reviewer_name'] for r in reviewers]) if not is_single_reviewer else ""
+    
+    # Build the reviewer row HTML - only show when multiple reviewers
+    reviewer_row_html = f'''<tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewers</td>
+            <td style="border:1px solid #ddd;">{all_reviewer_names}</td>
+        </tr>''' if not is_single_reviewer else ""
+    
+    # QCR notification text - singular vs plural
+    qcr_note_text = f"<strong>{item['qcr_name'] or 'The QC Reviewer'}</strong> has been assigned and will be notified once {'you have submitted your response' if is_single_reviewer else 'all reviewers have submitted their responses'}."
     
     # Determine if using file-based forms (local mode) - still need folder for form generation
     folder_path = item['folder_link'] or 'Not set'
@@ -6990,10 +7014,7 @@ def send_multi_reviewer_assignment_emails(item_id):
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
         </tr>
-        <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
-            <td style="border:1px solid #ddd;">{all_reviewer_names}</td>
-        </tr>
+        {reviewer_row_html}
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
@@ -7002,7 +7023,7 @@ def send_multi_reviewer_assignment_emails(item_id):
 
     <!-- QCR NOTE -->
     <p style="margin-top:16px; font-size:13px; color:#555;">
-        <strong>{item['qcr_name'] or 'The QC Reviewer'}</strong> has been assigned and will be notified once all reviewers have submitted their responses.
+        {qcr_note_text}
     </p>
 
     <!-- FOOTER -->
@@ -7096,10 +7117,7 @@ def send_multi_reviewer_assignment_emails(item_id):
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
             <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
         </tr>
-        <tr>
-            <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
-            <td style="border:1px solid #ddd;">{all_reviewer_names}</td>
-        </tr>
+        {reviewer_row_html}
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
@@ -7108,7 +7126,7 @@ def send_multi_reviewer_assignment_emails(item_id):
 
     <!-- QCR NOTE -->
     <p style="margin-top:16px; font-size:13px; color:#555;">
-        <strong>{item['qcr_name'] or 'The QC Reviewer'}</strong> has been assigned and will be notified once all reviewers have submitted their responses.
+        {qcr_note_text}
     </p>
 
     <!-- FOOTER -->
@@ -7147,23 +7165,35 @@ def send_multi_reviewer_assignment_emails(item_id):
     qcr_email_sent = False
     if item['qcr_email'] and sent_count > 0:
         try:
+            is_single_reviewer = len(reviewers) == 1
             reviewer_names_list = "<br>".join([f"• {r['reviewer_name']}" for r in reviewers])
             
             qcr_subject = f"[LEB] {item['identifier']} – Assigned to You for QC Review"
+            
+            # Use singular language when there's only 1 reviewer
+            if is_single_reviewer:
+                notified_text = "You will be notified once the reviewer has submitted their response."
+                assigned_text = "The initial reviewer listed below has been notified and is currently working on their response."
+                reviewer_header = "👤 Assigned Reviewer"
+            else:
+                notified_text = "You will be notified once all reviewers have submitted their responses."
+                assigned_text = "The initial reviewers listed below have been notified and are currently working on their responses."
+                reviewer_header = f"👥 Assigned Reviewers ({len(reviewers)})"
+            
             qcr_html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.6;">
 
     <h2 style="color:#2563eb; margin-bottom:10px;">[LEB] {item['identifier']} – Assigned to You for QC Review</h2>
     
     <div style="background:#dbeafe; border:1px solid #3b82f6; border-radius:8px; padding:15px; margin:15px 0;">
         <p style="margin:0; font-size:14px; color:#1e40af;">
-            <strong>📋 You will be notified once all reviewers have submitted their responses.</strong>
+            <strong>📋 {notified_text}</strong>
         </p>
     </div>
     
-    <p>You have been assigned as the <strong>QC Reviewer</strong> for the following item. The initial reviewers listed below have been notified and are currently working on their responses.</p>
+    <p>You have been assigned as the <strong>QC Reviewer</strong> for the following item. {assigned_text}</p>
     
     <div style="background:#f8fafc; border-radius:8px; padding:15px; margin:15px 0; border:1px solid #e5e7eb;">
-        <h4 style="margin:0 0 10px 0; color:#374151;">👥 Assigned Reviewers ({len(reviewers)})</h4>
+        <h4 style="margin:0 0 10px 0; color:#374151;">{reviewer_header}</h4>
         <div style="color:#4b5563;">
             {reviewer_names_list}
         </div>
@@ -7206,7 +7236,7 @@ def send_multi_reviewer_assignment_emails(item_id):
     </table>
     
     <p style="margin-top:20px; font-size:13px; color:#666;">
-        Once all reviewers have submitted their responses, you will receive another email with a link to complete your QC review.
+        {'Once the reviewer has submitted their response' if is_single_reviewer else 'Once all reviewers have submitted their responses'}, you will receive another email with a link to complete your QC review.
     </p>
     
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -7254,7 +7284,7 @@ def send_multi_reviewer_assignment_emails(item_id):
 
 
 def generate_multi_reviewer_qcr_form(item_id):
-    """Generate an HTA form for the QCR in multi-reviewer mode.
+    """Generate an HTA form for the QCR - uses appropriate template based on reviewer count.
     
     Args:
         item_id: The item ID
@@ -7286,10 +7316,20 @@ def generate_multi_reviewer_qcr_form(item_id):
     reviewers = cursor.fetchall()
     conn.close()
     
-    # Load template
-    template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_QCR_TEMPLATE.hta"
-    if not template_path.exists():
-        return {'success': False, 'error': 'Multi-reviewer QCR form template not found'}
+    # Check if truly multi-reviewer (more than 1 reviewer)
+    is_multi_reviewer = len(reviewers) > 1
+    
+    # Load appropriate template based on reviewer count
+    if is_multi_reviewer:
+        # Multi-reviewer: use multi-reviewer QCR template
+        template_path = TEMPLATES_DIR / "_MULTI_REVIEWER_QCR_TEMPLATE.hta"
+        if not template_path.exists():
+            return {'success': False, 'error': 'Multi-reviewer QCR form template not found'}
+    else:
+        # Single reviewer: use regular QCR template
+        template_path = TEMPLATES_DIR / "_QCR_FORM_TEMPLATE_v3.hta"
+        if not template_path.exists():
+            return {'success': False, 'error': 'QCR form template not found'}
     
     with open(template_path, 'r', encoding='utf-8') as f:
         template = f.read()
@@ -7300,26 +7340,30 @@ def generate_multi_reviewer_qcr_form(item_id):
             return ''
         return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
     
-    # Build reviewer responses HTML
-    reviewer_html = ""
-    reviewer_checkboxes_html = ""
-    reviewers_json_list = []
+    # Start with the template
+    html = template
     
-    for idx, r in enumerate(reviewers, 1):
-        category = r['response_category'] or 'N/A'
-        notes = r['internal_notes'] or ''
+    if is_multi_reviewer:
+        # Build multi-reviewer specific HTML sections
+        reviewer_html = ""
+        reviewer_checkboxes_html = ""
+        reviewers_json_list = []
         
-        notes_section = ""
-        if notes:
-            notes_section = f'''
+        for idx, r in enumerate(reviewers, 1):
+            category = r['response_category'] or 'N/A'
+            notes = r['internal_notes'] or ''
+            
+            notes_section = ""
+            if notes:
+                notes_section = f'''
             <div class="internal-notes-box">
                 <h5>Suggested Response for QC Reviewer (Team Only):</h5>
                 <div class="internal-notes-content">{notes}</div>
             </div>'''
-        else:
-            notes_section = '<p class="no-notes">No suggested response provided.</p>'
-        
-        reviewer_html += f'''
+            else:
+                notes_section = '<p class="no-notes">No suggested response provided.</p>'
+            
+            reviewer_html += f'''
         <div class="reviewer-response-box">
             <div class="reviewer-header">
                 <span class="reviewer-badge">{idx}</span>
@@ -7328,28 +7372,54 @@ def generate_multi_reviewer_qcr_form(item_id):
             </div>
             {notes_section}
         </div>'''
-        
-        # Build checkbox for send-back selection
-        reviewer_checkboxes_html += f'''
+            
+            # Build checkbox for send-back selection
+            reviewer_checkboxes_html += f'''
         <label style="display:flex; align-items:center; padding:8px; background:white; border-radius:6px; margin-bottom:6px; cursor:pointer;">
             <input type="checkbox" name="sendback_reviewers" value="{r['id']}" checked style="width:18px; height:18px; margin-right:10px;">
             <span style="flex:1;">{r['reviewer_name']}</span>
             <span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:11px;">{category}</span>
         </label>'''
+            
+            # Build JSON data for JavaScript
+            reviewers_json_list.append({
+                'id': r['id'],
+                'name': r['reviewer_name'],
+                'email': r['reviewer_email'],
+                'category': category
+            })
         
-        # Build JSON data for JavaScript
-        reviewers_json_list.append({
-            'id': r['id'],
-            'name': r['reviewer_name'],
-            'email': r['reviewer_email'],
-            'category': category
-        })
+        # Convert reviewers list to JSON for JavaScript
+        reviewers_json = json.dumps(reviewers_json_list)
+        
+        # Replace multi-reviewer specific placeholders
+        html = html.replace('{{REVIEWER_COUNT}}', str(len(reviewers)))
+        html = html.replace('{{REVIEWER_RESPONSES_HTML}}', reviewer_html)
+        html = html.replace('{{REVIEWER_CHECKBOXES_HTML}}', reviewer_checkboxes_html)
+        html = html.replace('{{REVIEWERS_JSON}}', reviewers_json)
+    else:
+        # Single reviewer from item_reviewers table - populate single-reviewer template fields
+        r = reviewers[0]  # Get the single reviewer
+        reviewer_notes = r['internal_notes'] or 'No comments provided'
+        reviewer_category = r['response_category'] or 'N/A'
+        
+        # For single reviewer using item_reviewers, we don't have selected_files 
+        # (Bluebeam-based workflow), so indicate that
+        reviewer_selected_files_text = 'Files selected in Bluebeam session'
+        reviewer_selected_files_js = '[]'  # Empty array for JS
+        
+        # Replace single-reviewer specific placeholders
+        html = template.replace('{{RESPONSE_VERSION}}', '1')
+        html = template.replace('{{REVIEWER_NAME}}', r['reviewer_name'] or 'N/A')
+        html = template.replace('{{REVIEWER_RESPONSE_CATEGORY}}', reviewer_category)
+        html = html.replace('{{REVIEWER_NOTES}}', js_escape(reviewer_notes))
+        html = html.replace('{{REVIEWER_SELECTED_FILES_TEXT}}', reviewer_selected_files_text)
+        html = html.replace('{{REVIEWER_SELECTED_FILES_JS}}', reviewer_selected_files_js)
+        html = html.replace('{{REVIEWER_INTERNAL_NOTES}}', js_escape(reviewer_notes))
+        html = html.replace('{{REVIEWER_INTERNAL_NOTES_DISPLAY}}', 'block' if reviewer_notes else 'none')
     
-    # Convert reviewers list to JSON for JavaScript
-    reviewers_json = json.dumps(reviewers_json_list)
-    
-    # Replace placeholders
-    html = template.replace('{{ITEM_ID}}', str(item['id']))
+    # Replace common placeholders (used by both templates)
+    html = html.replace('{{ITEM_ID}}', str(item['id']))
     html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
@@ -7360,11 +7430,8 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
     html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']))
+    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
     html = html.replace('{{TOKEN}}', item['email_token_qcr'] or '')
-    html = html.replace('{{REVIEWER_COUNT}}', str(len(reviewers)))
-    html = html.replace('{{REVIEWER_RESPONSES_HTML}}', reviewer_html)
-    html = html.replace('{{REVIEWER_CHECKBOXES_HTML}}', reviewer_checkboxes_html)
-    html = html.replace('{{REVIEWERS_JSON}}', reviewers_json)
     
     # Save to item folder
     folder_path = Path(item['folder_link'])
@@ -7462,16 +7529,18 @@ def send_multi_reviewer_qcr_email(item_id):
     # Build reviewer names for display (each on new line)
     reviewer_names_html = "<br>".join([r['reviewer_name'] for r in reviewers])
     
-    # Build reviewer summary table
+    # Build reviewer summary table with full comments (not truncated)
     reviewer_summary = ""
     for r in reviewers:
         category = r['response_category'] or 'N/A'
-        notes_preview = r['internal_notes'][:100] + '...' if r['internal_notes'] and len(r['internal_notes']) > 100 else (r['internal_notes'] or 'None')
+        # Show full internal notes without truncation
+        internal_notes = r['internal_notes'] or ''
+        notes_html = internal_notes.replace('\n', '<br>') if internal_notes else '<span style="color:#999;">No comments</span>'
         reviewer_summary += f"""
         <tr>
-            <td style="padding:8px; border-bottom:1px solid #e5e7eb;">{r['reviewer_name']}</td>
-            <td style="padding:8px; border-bottom:1px solid #e5e7eb;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>
-            <td style="padding:8px; border-bottom:1px solid #e5e7eb; font-size:12px; color:#666;">{notes_preview}</td>
+            <td style="padding:10px; border-bottom:1px solid #e5e7eb; vertical-align:top;">{r['reviewer_name']}</td>
+            <td style="padding:10px; border-bottom:1px solid #e5e7eb; vertical-align:top;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>
+            <td style="padding:10px; border-bottom:1px solid #e5e7eb; font-size:13px; color:#444; vertical-align:top;">{notes_html}</td>
         </tr>
 """
     
@@ -7906,15 +7975,19 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
     # Build list of initial reviewer names
     initial_reviewers_list = ', '.join([r['reviewer_name'] for r in reviewers])
     
-    # Build reviewer summary HTML
+    # Build reviewer summary HTML with full comments
     reviewer_summary = ""
     for idx, r in enumerate(reviewers, 1):
         category = r['response_category'] or 'N/A'
+        # Show full internal notes without truncation
+        internal_notes = r['internal_notes'] or ''
+        notes_html = internal_notes.replace('\n', '<br>') if internal_notes else '<span style="color:#999;">No comments</span>'
         reviewer_summary += f"""
         <tr>
-            <td style="padding:8px; border:1px solid #e5e7eb;">{idx}</td>
-            <td style="padding:8px; border:1px solid #e5e7eb;">{r['reviewer_name']}</td>
-            <td style="padding:8px; border:1px solid #e5e7eb;">{category}</td>
+            <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{idx}</td>
+            <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{r['reviewer_name']}</td>
+            <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>
+            <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{notes_html}</td>
         </tr>"""
     
     subject = f"[LEB] {item['identifier']} – QC Review Complete ✅"
@@ -7947,12 +8020,13 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
         </div>
         
         <div style="margin:15px 0;">
-            <h4 style="margin:0 0 10px 0; color:#374151;">👥 Reviewer Responses Summary</h4>
+            <h4 style="margin:0 0 10px 0; color:#374151;">👥 Reviewer Responses</h4>
             <table style="width:100%; border-collapse:collapse; font-size:13px; background:white;">
                 <tr style="background:#f1f5f9;">
-                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left; width:40px;">#</th>
-                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left;">Reviewer</th>
-                    <th style="padding:8px; border:1px solid #e5e7eb; text-align:left;">Response Category</th>
+                    <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:40px;">#</th>
+                    <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:140px;">Reviewer</th>
+                    <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:120px;">Category</th>
+                    <th style="padding:10px; border:1px solid #e5e7eb; text-align:left;">Comments</th>
                 </tr>
                 {reviewer_summary}
             </table>
