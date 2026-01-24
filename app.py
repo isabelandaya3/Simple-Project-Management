@@ -2775,14 +2775,15 @@ def generate_qcr_form_html(item_id):
 
 
 def process_reviewer_response_json(json_path):
-    """Process a _reviewer_response.json file and import it into the database."""
+    """Process a _reviewer_response.json or _RESPONSE_*.json file and import it into the database."""
     try:
         with open(json_path, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
         
-        # Validate it's the right type
-        if data.get('_form_type') != 'reviewer_response':
-            return {'success': False, 'error': 'Invalid form type'}
+        # Validate it's the right type (accept both reviewer_response and rfi_response)
+        form_type = data.get('_form_type')
+        if form_type not in ('reviewer_response', 'rfi_response'):
+            return {'success': False, 'error': f'Invalid form type: {form_type}'}
         
         token = data.get('token')
         if not token:
@@ -2791,9 +2792,18 @@ def process_reviewer_response_json(json_path):
         conn = get_db()
         cursor = conn.cursor()
         
-        # Find item by token
+        # Find item by token - check both item table and item_reviewers table
         cursor.execute('SELECT id, reviewer_response_version FROM item WHERE email_token_reviewer = ?', (token,))
         item = cursor.fetchone()
+        
+        # If not found in item table, check item_reviewers table (multi-reviewer mode)
+        if not item:
+            cursor.execute('SELECT item_id FROM item_reviewers WHERE email_token = ?', (token,))
+            reviewer_row = cursor.fetchone()
+            if reviewer_row:
+                # Get item details
+                cursor.execute('SELECT id, reviewer_response_version FROM item WHERE id = ?', (reviewer_row['item_id'],))
+                item = cursor.fetchone()
         
         if not item:
             conn.close()
@@ -2817,6 +2827,10 @@ def process_reviewer_response_json(json_path):
         
         # Update item with new response
         selected_files_json = json.dumps(data.get('selected_files', []))
+        
+        # Handle both field naming conventions (notes vs response_text)
+        response_notes = data.get('notes') or data.get('response_text', '')
+        
         cursor.execute('''
             UPDATE item SET
                 reviewer_response_category = ?,
@@ -2829,7 +2843,7 @@ def process_reviewer_response_json(json_path):
             WHERE id = ?
         ''', (
             data.get('response_category'),
-            data.get('notes'),
+            response_notes,
             data.get('internal_notes'),
             selected_files_json,
             data.get('_submitted_at', datetime.now().isoformat()),
@@ -3410,8 +3424,26 @@ def scan_folders_for_responses():
     if not base_path.exists():
         return results
     
-    # Scan for _reviewer_response.json files
+    # Scan for _reviewer_response.json files (exact match)
     for json_file in base_path.rglob('_reviewer_response.json'):
+        result = process_reviewer_response_json(json_file)
+        if result['success']:
+            results['reviewer_responses'].append({
+                'path': str(json_file),
+                'item_id': result.get('item_id'),
+                'version': result.get('version')
+            })
+        else:
+            results['errors'].append({
+                'path': str(json_file),
+                'error': result.get('error')
+            })
+    
+    # Scan for timestamped response files (_RESPONSE_*.json)
+    for json_file in base_path.rglob('_RESPONSE_*.json'):
+        # Skip .old files
+        if json_file.suffix == '.old' or '.json.old' in str(json_file):
+            continue
         result = process_reviewer_response_json(json_file)
         if result['success']:
             results['reviewer_responses'].append({
