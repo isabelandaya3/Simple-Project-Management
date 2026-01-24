@@ -5734,6 +5734,15 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         conn.close()
         return {'success': False, 'error': 'No QCR assigned'}
     
+    # Get all reviewers (from item_reviewers table for multi-reviewer items)
+    cursor.execute('SELECT reviewer_email FROM item_reviewers WHERE item_id = ?', (item_id,))
+    multi_reviewers = cursor.fetchall()
+    all_reviewer_emails = [r['reviewer_email'] for r in multi_reviewers if r['reviewer_email']]
+    
+    # Add single reviewer if exists and not already in list
+    if item['reviewer_email'] and item['reviewer_email'] not in all_reviewer_emails:
+        all_reviewer_emails.append(item['reviewer_email'])
+    
     # Calculate due dates if not already set (ensures consistency with app display)
     qcr_due_date_email = item['qcr_due_date']
     
@@ -6192,8 +6201,9 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             outlook = win32com.client.Dispatch("Outlook.Application")
             mail = outlook.CreateItem(0)  # 0 = olMailItem
             mail.To = item['qcr_email']
-            if item['reviewer_email']:
-                mail.CC = item['reviewer_email']
+            # CC all reviewers (single or multi-reviewer)
+            if all_reviewer_emails:
+                mail.CC = '; '.join(all_reviewer_emails)
             mail.Subject = subject
             mail.HTMLBody = html_body
             mail.Send()
@@ -6367,8 +6377,9 @@ def send_qcr_version_update_email(item_id, version):
             outlook = win32com.client.Dispatch("Outlook.Application")
             mail = outlook.CreateItem(0)
             mail.To = item['qcr_email']
-            if item['reviewer_email']:
-                mail.CC = item['reviewer_email']
+            # CC all reviewers (single or multi-reviewer)
+            if all_reviewer_emails:
+                mail.CC = '; '.join(all_reviewer_emails)
             mail.Subject = subject
             mail.HTMLBody = html_body
             mail.Send()
