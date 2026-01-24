@@ -3487,6 +3487,7 @@ class FolderResponseWatcher:
         self.interval = interval_seconds
         self.last_scan = None
         self.scan_count = 0
+        self.logged_errors = {}  # Track logged errors to avoid spam
     
     def start(self):
         """Start the watcher thread."""
@@ -3520,8 +3521,19 @@ class FolderResponseWatcher:
                         print(f"  [Watcher] Imported multi-reviewer response for item {resp['item_id']} from {resp['reviewer']} - ALL RESPONDED, QCR notified")
                     else:
                         print(f"  [Watcher] Imported multi-reviewer response for item {resp['item_id']} from {resp['reviewer']} - waiting for others")
+                
+                # Only log new/changed errors to avoid spam
                 for err in results['errors']:
-                    print(f"  [Watcher] Error processing {err['path']}: {err['error']}")
+                    error_key = f"{err['path']}:{err['error']}"
+                    if error_key not in self.logged_errors:
+                        print(f"  [Watcher] Error processing {err['path']}: {err['error']}")
+                        self.logged_errors[error_key] = True
+                        # Limit logged errors to prevent memory growth
+                        if len(self.logged_errors) > 100:
+                            # Clear oldest half
+                            keys_to_remove = list(self.logged_errors.keys())[:50]
+                            for key in keys_to_remove:
+                                del self.logged_errors[key]
                 
                 # Process any pending emails that failed earlier
                 process_pending_emails()
