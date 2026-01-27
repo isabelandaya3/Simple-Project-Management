@@ -262,6 +262,12 @@
             <p>All reviewer markups are in the corresponding <strong>Bluebeam Studio session</strong> for this item. Please review the markups there before completing your QC decision.</p>
         </div>
 
+        <!-- RFI Question Section (shown only for RFI items) -->
+        <div id="rfi-question-section" class="info-box" style="background: #fff8e1; border: 2px solid #ffc107; display: none;">
+            <div style="font-size: 15px; color: #f57c00; font-weight: bold; margin-bottom: 10px;">&#10067; RFI Question</div>
+            <div id="rfi-question-text" style="font-size: 14px; color: #333; line-height: 1.6; white-space: pre-wrap;">{{RFI_QUESTION}}</div>
+        </div>
+
         <!-- Reviewer Responses Section -->
         <div class="reviewer-responses-section">
             <h3>Reviewer Responses ({{REVIEWER_COUNT}})</h3>
@@ -355,7 +361,18 @@
             qcr_email: "{{QCR_EMAIL}}",
             folder_path: "{{FOLDER_PATH}}",
             reviewer_count: {{REVIEWER_COUNT}},
-            reviewers: {{REVIEWERS_JSON}}
+            reviewers: {{REVIEWERS_JSON}},
+            is_rfi: {{IS_RFI}}
+        };
+        
+        window.onload = function() {
+            // Show RFI question section if this is an RFI item
+            if (ITEM_CONFIG.is_rfi) {
+                var rfiSection = document.getElementById('rfi-question-section');
+                if (rfiSection) {
+                    rfiSection.style.display = 'block';
+                }
+            }
         };
         
         var fso = new ActiveXObject("Scripting.FileSystemObject");

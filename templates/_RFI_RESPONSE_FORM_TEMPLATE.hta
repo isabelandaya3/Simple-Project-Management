@@ -215,7 +215,7 @@
         <div class="info-box">
             <div class="info-row">
                 <span class="info-label">Title:</span>
-                <span class="info-value">{{ITEM_TITLE}}</span>
+                <span class="info-value">{{ITEM_TITLE_HTML}}</span>
             </div>
             <div class="info-row">
                 <span class="info-label">Date Received:</span>
@@ -315,21 +315,24 @@
                     return;
                 }
                 
-                var folder = fso.GetFolder(ITEM_CONFIG.folder_path);
-                var files = new Enumerator(folder.Files);
+                // Use DIR command to list PDFs - works better with special characters in paths
+                var exec = shell.Exec('cmd /c dir /b "' + ITEM_CONFIG.folder_path + '\\*.pdf"');
+                var output = exec.StdOut.ReadAll();
                 var html = '';
                 var count = 0;
                 
-                for (; !files.atEnd(); files.moveNext()) {
-                    var file = files.item();
-                    var ext = fso.GetExtensionName(file.Name).toLowerCase();
-                    // Only show PDFs, exclude system files starting with _ or ~
-                    if (ext === "pdf" && file.Name.charAt(0) !== "_" && file.Name.charAt(0) !== "~") {
-                        html += "<div class='file-item'>" +
-                            "<input type='checkbox' name='selected_files' value='" + file.Name + "' id='file_" + count + "'>" +
-                            "<label for='file_" + count + "'>" + file.Name + "</label>" +
-                            "</div>";
-                        count++;
+                if (output && output.length > 0) {
+                    var fileNames = output.split("\r\n");
+                    for (var i = 0; i < fileNames.length; i++) {
+                        var fileName = fileNames[i].replace(/^\s+|\s+$/g, ''); // trim
+                        // Only show PDFs, exclude system files starting with _ or ~
+                        if (fileName.length > 0 && fileName.charAt(0) !== "_" && fileName.charAt(0) !== "~") {
+                            html += "<div class='file-item'>" +
+                                "<input type='checkbox' name='selected_files' value='" + fileName.replace(/'/g, "&#39;") + "' id='file_" + count + "'>" +
+                                "<label for='file_" + count + "'>" + fileName + "</label>" +
+                                "</div>";
+                            count++;
+                        }
                     }
                 }
                 

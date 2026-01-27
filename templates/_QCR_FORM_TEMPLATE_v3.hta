@@ -255,7 +255,7 @@
         <div class="info-box">
             <div class="info-row">
                 <span class="info-label">Title:</span>
-                <span class="info-value">{{ITEM_TITLE}}</span>
+                <span class="info-value">{{ITEM_TITLE_HTML}}</span>
             </div>
             <div class="info-row">
                 <span class="info-label">Date Received:</span>
@@ -287,6 +287,12 @@
             <strong>Item Folder:</strong>
             <span class="folder-path" id="folder-path">{{FOLDER_PATH_RAW}}</span>
             <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
+        </div>
+
+        <!-- RFI Question Section (shown only for RFI items) -->
+        <div id="rfi-question-section" class="info-box" style="background: #fff8e1; border: 2px solid #ffc107; display: none;">
+            <div style="font-size: 15px; color: #f57c00; font-weight: bold; margin-bottom: 10px;">&#10067; RFI Question</div>
+            <div id="rfi-question-text" style="font-size: 14px; color: #333; line-height: 1.6; white-space: pre-wrap;">{{RFI_QUESTION}}</div>
         </div>
 
         <!-- Reviewer's Submitted Response -->
@@ -426,7 +432,8 @@
             reviewer_name: "{{REVIEWER_NAME}}",
             reviewer_response_category: "{{REVIEWER_RESPONSE_CATEGORY}}",
             response_version: {{RESPONSE_VERSION}},
-            folder_path: "{{FOLDER_PATH}}"
+            folder_path: "{{FOLDER_PATH}}",
+            is_rfi: {{IS_RFI}}
         };
         
         // Reviewer's selected files (from template)
@@ -442,6 +449,14 @@
         }
 
         window.onload = function() {
+            // Show RFI question section if this is an RFI
+            if (ITEM_CONFIG.is_rfi) {
+                var rfiSection = document.getElementById("rfi-question-section");
+                if (rfiSection) {
+                    rfiSection.style.display = "block";
+                }
+            }
+            
             // Get original reviewer text from notes
             var notesEl = document.getElementById("reviewer_notes_display");
             if (notesEl) {
@@ -560,30 +575,33 @@
                 return;
             }
             
-            var folder = fso.GetFolder(folderPath);
-            var files = new Enumerator(folder.Files);
+            // Use DIR command to list PDFs - works better with special characters in paths
+            var exec = shell.Exec('cmd /c dir /b "' + folderPath + '\\*.pdf"');
+            var output = exec.StdOut.ReadAll();
             var html = "";
             var count = 0;
             
-            for (; !files.atEnd(); files.moveNext()) {
-                var file = files.item();
-                var ext = fso.GetExtensionName(file.Name).toLowerCase();
-                // Only show PDFs, exclude system files starting with _ or ~
-                if (ext === "pdf" && file.Name.charAt(0) !== "_" && file.Name.charAt(0) !== "~") {
-                    // Check if this file was selected by reviewer
-                    var isReviewerFile = false;
-                    for (var j = 0; j < REVIEWER_FILES.length; j++) {
-                        if (REVIEWER_FILES[j] === file.Name) {
-                            isReviewerFile = true;
-                            break;
+            if (output && output.length > 0) {
+                var fileNames = output.split("\r\n");
+                for (var i = 0; i < fileNames.length; i++) {
+                    var fileName = fileNames[i].replace(/^\s+|\s+$/g, ''); // trim
+                    // Only show PDFs, exclude system files starting with _ or ~
+                    if (fileName.length > 0 && fileName.charAt(0) !== "_" && fileName.charAt(0) !== "~") {
+                        // Check if this file was selected by reviewer
+                        var isReviewerFile = false;
+                        for (var j = 0; j < REVIEWER_FILES.length; j++) {
+                            if (REVIEWER_FILES[j] === fileName) {
+                                isReviewerFile = true;
+                                break;
+                            }
                         }
+                        
+                        html += "<div class='file-item'>" +
+                            "<input type='checkbox' name='selected_files' value='" + fileName.replace(/'/g, "&#39;") + "' id='file_" + count + "'" + (isReviewerFile ? " checked" : "") + ">" +
+                            "<label for='file_" + count + "'>" + fileName + (isReviewerFile ? " <span style='color:#166534; font-size:11px;'>(reviewer selected)</span>" : "") + "</label>" +
+                            "</div>";
+                        count++;
                     }
-                    
-                    html += "<div class='file-item'>" +
-                        "<input type='checkbox' name='selected_files' value='" + file.Name + "' id='file_" + count + "'" + (isReviewerFile ? " checked" : "") + ">" +
-                        "<label for='file_" + count + "'>" + file.Name + (isReviewerFile ? " <span style='color:#166534; font-size:11px;'>(reviewer selected)</span>" : "") + "</label>" +
-                        "</div>";
-                    count++;
                 }
             }
             

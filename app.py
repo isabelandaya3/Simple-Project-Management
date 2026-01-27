@@ -180,29 +180,33 @@ def update_rfi_tracker_excel(item, action='close'):
         else:
             rfi_number = identifier  # Use as-is if no number found
         
+        # Build the RFI ID for display (e.g., "RFI #33")
+        rfi_id_display = f"RFI #{rfi_number}" if rfi_number.isdigit() else identifier
+        
         # Get title (name after numbers)
         title = item.get('title', '') or ''
         
-        # Get the contractor's question - use source_subject or title as fallback
-        # The question typically comes from the original email subject/body
-        question = item.get('source_subject', '') or title
+        # Get the contractor's RFI question from the rfi_question field
+        question = item.get('rfi_question', '') or item.get('source_subject', '') or title
         
-        # Get the final response
-        response = item.get('final_response_text', '') or item.get('response_text', '') or ''
+        # Get the final response text
+        response = item.get('final_response_text', '') or item.get('reviewer_response_text', '') or item.get('response_text', '') or ''
         
         # Load the workbook
         wb = load_workbook(excel_path)
         ws = wb.active  # Use the active sheet, or specify by name: wb['SheetName']
         
-        # Find headers to determine columns (look in first few rows)
+        # Find headers to determine columns (look in first 10 rows - header may be below legend)
         header_row = None
         col_rfi_id = None
         col_title = None
         col_question = None
         col_response = None
         col_status = None
+        col_notes = None
+        col_link = None
         
-        for row_num in range(1, 6):  # Check first 5 rows for headers
+        for row_num in range(1, 11):  # Check first 10 rows for headers (may be below legend rows)
             for col_num in range(1, 20):  # Check first 20 columns
                 cell_value = str(ws.cell(row=row_num, column=col_num).value or '').strip().lower()
                 if 'rfi' in cell_value and ('id' in cell_value or '#' in cell_value or 'number' in cell_value or cell_value == 'rfi'):
@@ -210,25 +214,38 @@ def update_rfi_tracker_excel(item, action='close'):
                     header_row = row_num
                 elif cell_value in ('title', 'name', 'subject', 'description'):
                     col_title = col_num
-                    header_row = row_num
+                    if header_row is None:
+                        header_row = row_num
                 elif 'question' in cell_value or 'query' in cell_value:
                     col_question = col_num
-                    header_row = row_num
+                    if header_row is None:
+                        header_row = row_num
                 elif 'response' in cell_value or 'answer' in cell_value or 'reply' in cell_value:
                     col_response = col_num
-                    header_row = row_num
+                    if header_row is None:
+                        header_row = row_num
                 elif 'status' in cell_value:
                     col_status = col_num
-                    header_row = row_num
+                    if header_row is None:
+                        header_row = row_num
+                elif 'notes' in cell_value:
+                    col_notes = col_num
+                elif 'link' in cell_value:
+                    col_link = col_num
         
         if not header_row:
-            # Default to assuming row 1 is headers with standard column layout
-            header_row = 1
-            col_rfi_id = 1
-            col_title = 2
-            col_question = 3
-            col_response = 4
-            col_status = 5
+            # Default to row 6 based on known file structure (rows 1-4 are legend, row 6 is headers)
+            header_row = 6
+            col_rfi_id = 1      # A: RFI ID
+            col_title = 2       # B: Title
+            # col 3 = Change? (skip)
+            col_question = 4    # D: Question
+            col_response = 5    # E: Response
+            col_notes = 6       # F: Notes
+            col_link = 7        # G: Link
+            col_status = None   # No status column in this file
+        
+        print(f"[RFI Excel] Header row: {header_row}, Columns - RFI ID: {col_rfi_id}, Title: {col_title}, Question: {col_question}, Response: {col_response}")
         
         # Find existing row with this RFI number, or find first empty row
         existing_row = None
@@ -236,9 +253,13 @@ def update_rfi_tracker_excel(item, action='close'):
         
         for row_num in range(header_row + 1, ws.max_row + 2):
             cell_value = ws.cell(row=row_num, column=col_rfi_id or 1).value
-            if cell_value is not None:
-                # Check if this RFI already exists
-                if str(cell_value).strip() == rfi_number:
+            if cell_value is not None and str(cell_value).strip():
+                # Check if this RFI already exists (match by number)
+                cell_str = str(cell_value).strip()
+                # Extract just the number for comparison
+                cell_num_match = re.search(r'(\d+)', cell_str)
+                cell_num = cell_num_match.group(1) if cell_num_match else cell_str
+                if cell_num == rfi_number:
                     existing_row = row_num
                     break
             else:
@@ -251,10 +272,13 @@ def update_rfi_tracker_excel(item, action='close'):
         
         target_row = existing_row or first_empty_row
         
+        print(f"[RFI Excel] Writing to row {target_row} (existing: {existing_row}, first_empty: {first_empty_row})")
+        print(f"[RFI Excel] Data - RFI ID: {rfi_id_display}, Title: {title[:50] if title else 'None'}...")
+        
         if action == 'close':
             # Add or update the RFI entry
             if col_rfi_id:
-                ws.cell(row=target_row, column=col_rfi_id).value = rfi_number
+                ws.cell(row=target_row, column=col_rfi_id).value = rfi_id_display
             if col_title:
                 ws.cell(row=target_row, column=col_title).value = title
             if col_question:
@@ -2499,6 +2523,94 @@ def parse_priority(body):
         return priority_map.get(priority, priority)
     return None
 
+def parse_rfi_question(body):
+    """Extract the RFI Question from the ACC email body.
+    
+    ACC RFI emails have a 'Question' field that contains the contractor's query.
+    Format: 'Question    <the question text>'
+    """
+    if not body:
+        return None
+    
+    # Pattern to match "Question" field with tab/whitespace separation
+    # The question can be multi-line, so we capture until we hit another field label
+    patterns = [
+        # Question followed by whitespace/tab and text until Status or next field
+        r'(?:^|\n)\s*Question[:\s\t]+(.+?)(?=\n\s*(?:Status|Ball in court|Due Date|Participants|Creator|Manager|Reviewers|Co-reviewers|Watchers|$))',
+        # Simpler fallback - just get the line after Question
+        r'(?:^|\n)\s*Question[:\s\t]+([^\n]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
+        if match:
+            question = match.group(1).strip()
+            if question and len(question) > 5:  # Make sure it's substantial
+                return question
+    
+    return None
+
+def parse_rfi_reviewers(body):
+    """Extract the list of Reviewers from an ACC RFI email.
+    
+    ACC RFI emails have a 'Reviewers' field listing who needs to review.
+    Format: 'Reviewers    Name1 (Company1), Name2 (Company2)'
+    
+    Returns a list of reviewer names (without company info).
+    """
+    if not body:
+        return []
+    
+    reviewers = []
+    
+    # Pattern to match "Reviewers" field
+    patterns = [
+        r'(?:^|\n)\s*Reviewers[:\s\t]+(.+?)(?=\n\s*(?:Co-reviewers|Watchers|$|\n\n))',
+        r'(?:^|\n)\s*Reviewers[:\s\t]+([^\n]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
+        if match:
+            reviewer_text = match.group(1).strip()
+            # Split by comma and extract names
+            # Format: "Name (Company), Name2 (Company2)"
+            parts = reviewer_text.split(',')
+            for part in parts:
+                part = part.strip()
+                # Extract just the name (before the parentheses)
+                name_match = re.match(r'([^(]+)', part)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    if name:
+                        reviewers.append(name)
+            break
+    
+    return reviewers
+
+def is_user_in_rfi_reviewers(body, user_names):
+    """Check if the current user is listed as a Reviewer in the RFI email.
+    
+    Args:
+        body: The email body text
+        user_names: List of user name patterns to match (e.g., ['Richard Hammerberg', 'Hammerberg'])
+    
+    Returns:
+        True if user is found in Reviewers list, False otherwise
+    """
+    if not body or not user_names:
+        return False
+    
+    reviewers = parse_rfi_reviewers(body)
+    
+    for user_name in user_names:
+        user_name_lower = user_name.lower()
+        for reviewer in reviewers:
+            if user_name_lower in reviewer.lower():
+                return True
+    
+    return False
+
 def sanitize_folder_name(name):
     """Create a filesystem-safe folder name."""
     # Remove or replace invalid characters
@@ -2609,6 +2721,12 @@ def generate_reviewer_form_html(item_id):
             return ''
         return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
     
+    # Escape special characters for HTML content
+    def html_escape(s):
+        if not s:
+            return ''
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
     # Create folder path URL for file:// link
     folder_path_url = str(item['folder_link']).replace('\\', '/')
     
@@ -2617,6 +2735,7 @@ def generate_reviewer_form_html(item_id):
     html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
     html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
     html = html.replace('{{REVIEWER_DUE_DATE}}', reviewer_due)
     html = html.replace('{{QCR_DUE_DATE}}', qcr_due)
@@ -2625,9 +2744,11 @@ def generate_reviewer_form_html(item_id):
     html = html.replace('{{REVIEWER_EMAIL}}', item['reviewer_email'] or '')
     html = html.replace('{{TOKEN}}', token)
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
-    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', html_escape(item['folder_link'] or ''))
     html = html.replace('{{FOLDER_PATH_URL}}', folder_path_url)
     html = html.replace('{{FOLDER_FILES_JSON}}', json.dumps(folder_files))
+    html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or ''))
+    html = html.replace('{{IS_RFI}}', 'true' if (item['type'] or '').upper() == 'RFI' else 'false')
     
     # Save to Responses subfolder (use .hta extension if HTA template, else .html)
     folder_path = Path(item['folder_link'])
@@ -2672,6 +2793,9 @@ def generate_qcr_form_html(item_id):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Convert to dict for easier handling (supports .get() method)
+    item = dict(item)
+    
     if not item['folder_link']:
         conn.close()
         return {'success': False, 'error': 'Item has no folder assigned'}
@@ -2712,6 +2836,12 @@ def generate_qcr_form_html(item_id):
             return ''
         return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
     
+    # Escape special characters for HTML content
+    def html_escape(s):
+        if not s:
+            return ''
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
     # Format reviewer selected files as HTML list items
     reviewer_files_html = ''
     reviewer_files_text = 'None selected'
@@ -2732,6 +2862,7 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
     html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
     html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
     html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
@@ -2741,7 +2872,7 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{QCR_EMAIL}}', item['qcr_email'] or '')
     html = html.replace('{{TOKEN}}', token)
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
-    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', html_escape(item['folder_link'] or ''))
     html = html.replace('{{REVIEWER_RESPONSE_CATEGORY}}', item['reviewer_response_category'] or 'Not specified')
     html = html.replace('{{REVIEWER_NOTES}}', js_escape(item['reviewer_notes'] or item['reviewer_response_text'] or 'No notes provided'))
     html = html.replace('{{REVIEWER_INTERNAL_NOTES}}', js_escape(item['reviewer_internal_notes'] or ''))
@@ -2750,6 +2881,8 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{REVIEWER_SELECTED_FILES_TEXT}}', reviewer_files_text)
     html = html.replace('{{REVIEWER_SELECTED_FILES_JS}}', reviewer_files_js)
     html = html.replace('{{RESPONSE_VERSION}}', str(response_version))
+    html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or ''))
+    html = html.replace('{{IS_RFI}}', 'true' if (item['type'] or '').upper() == 'RFI' else 'false')
     
     # Save to Responses subfolder (use .hta extension if HTA template, else .html)
     folder_path = Path(item['folder_link'])
@@ -2975,6 +3108,11 @@ def process_qcr_response_json(json_path):
             WHERE i.id = ?
         ''', (item_id,))
         item_info = cursor.fetchone()
+        
+        # Also get reviewer count while connection is open
+        cursor.execute('SELECT COUNT(*) as count FROM item_reviewers WHERE item_id = ?', (item_id,))
+        reviewer_count_result = cursor.fetchone()
+        has_multiple_reviewers = reviewer_count_result and reviewer_count_result['count'] > 1
         conn.close()
         
         if item_info:
@@ -2993,13 +3131,18 @@ def process_qcr_response_json(json_path):
                     action_label='Mark Complete'
                 )
                 
-                # Send confirmation emails to both QCR and reviewer
+                # Send confirmation emails - use appropriate function based on actual reviewer count
                 try:
-                    email_result = send_qcr_completion_confirmation_email(
-                        item_id, qc_action, qcr_notes, 
-                        final_category=final_category, 
-                        final_text=final_text
-                    )
+                    if has_multiple_reviewers:
+                        # Use multi-reviewer completion email
+                        email_result = send_multi_reviewer_completion_email(item_id, final_category, final_text)
+                    else:
+                        # Use single-reviewer completion email
+                        email_result = send_qcr_completion_confirmation_email(
+                            item_id, qc_action, qcr_notes, 
+                            final_category=final_category, 
+                            final_text=final_text
+                        )
                     if email_result.get('success'):
                         print(f"  [Watcher] QC completion confirmation emails sent for item {item_id}")
                     else:
@@ -4622,6 +4765,17 @@ class EmailPoller:
                     if not identifier:
                         continue
                     
+                    # For RFIs, only process if user is listed as a Reviewer
+                    rfi_question = None
+                    if item_type == 'RFI':
+                        user_names = CONFIG.get('user_names', [])
+                        if user_names:
+                            if not is_user_in_rfi_reviewers(body, user_names):
+                                print(f"  [RFI Skip] {identifier} - user not in Reviewers list")
+                                continue
+                        # Extract the RFI question
+                        rfi_question = parse_rfi_question(body)
+                    
                     bucket = determine_bucket(subject)
                     title = parse_title(subject, identifier, body)
                     due_date = parse_due_date(body)
@@ -4779,12 +4933,15 @@ class EmailPoller:
                             INSERT INTO item (type, bucket, identifier, title, source_subject, 
                                             created_at, last_email_at, due_date, priority, folder_link,
                                             date_received, initial_reviewer_due_date, qcr_due_date, 
-                                            is_contractor_window_insufficient, email_entry_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                            is_contractor_window_insufficient, email_entry_id, rfi_question)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (item_type, bucket, identifier, title, subject,
                               received_at, received_at, due_date, priority, folder_link,
-                              date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id))
+                              date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id, rfi_question))
                         item_id = cursor.lastrowid
+                        
+                        if rfi_question:
+                            print(f"  [RFI] {identifier} - Question captured: {rfi_question[:80]}...")
                     
                     # Log the email
                     cursor.execute('''
@@ -4872,6 +5029,9 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Convert to dict for easier handling (supports .get() method)
+    item = dict(item)
+    
     if not item['reviewer_email']:
         conn.close()
         return {'success': False, 'error': 'No Initial Reviewer assigned'}
@@ -4956,6 +5116,16 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
                 header_title = f"[LEB] {item['identifier']} - Assigned to You"
                 header_text = "You have been assigned a new review task. Please review the details below."
             
+            # Build RFI Question section if applicable
+            rfi_question_html = ""
+            if (item['type'] or '').upper() == 'RFI' and item.get('rfi_question'):
+                rfi_question_html = f"""
+    <!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#fff8e1; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:14px; color:#f57c00; font-weight:bold; margin-bottom:8px;">❓ RFI Question</div>
+        <div style="font-size:13px; color:#333; line-height:1.6; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>"""
+            
             # Email content for file-based form - DIRECT LINK to HTA file
             html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
@@ -4968,6 +5138,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         {header_text}
     </p>
 {revision_notice}
+{rfi_question_html}
     <!-- DIRECT LINK TO FORM - PROMINENT BUTTON -->
     <div style="margin:20px 0; text-align:center;">
         <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
@@ -5118,6 +5289,16 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
             header_title_server = f"[LEB] {item['identifier']} – Assigned to You"
             header_text_server = "You have been assigned a new review task. Please review the details below."
         
+        # Build RFI Question section if applicable (for server-based email)
+        rfi_question_html_server = ""
+        if (item['type'] or '').upper() == 'RFI' and item.get('rfi_question'):
+            rfi_question_html_server = f"""
+    <!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#fff8e1; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:14px; color:#f57c00; font-weight:bold; margin-bottom:8px;">❓ RFI Question</div>
+        <div style="font-size:13px; color:#333; line-height:1.6; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>"""
+        
         html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
 
     <!-- HEADER -->
@@ -5129,6 +5310,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         {header_text_server}
     </p>
 {revision_notice_server}
+{rfi_question_html_server}
     <!-- ACTION BUTTON - AT TOP -->
     <div style="margin:20px 0; text-align:center;">
         <table cellpadding="0" cellspacing="0" border="0" style="margin:0;">
@@ -5730,6 +5912,9 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Convert to dict for easier handling (supports .get() method)
+    item = dict(item)
+    
     if not item['qcr_email']:
         conn.close()
         return {'success': False, 'error': 'No QCR assigned'}
@@ -5836,6 +6021,16 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
     # Determine if using file-based forms (local mode) or server-based
     use_file_form = is_local_mode() and folder_path != 'Not set'
     
+    # Build RFI Question section if applicable (for QCR emails)
+    rfi_question_html_qcr = ""
+    if (item['type'] or '').upper() == 'RFI' and item.get('rfi_question'):
+        rfi_question_html_qcr = f"""
+    <!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#fff8e1; border:2px solid #ffc107; border-radius:8px;">
+        <div style="font-size:14px; color:#f57c00; font-weight:bold; margin-bottom:8px;">❓ RFI Question</div>
+        <div style="font-size:13px; color:#333; line-height:1.6; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>"""
+    
     if use_file_form:
         # Generate the HTA form file in the item folder
         form_result = generate_qcr_form_html(item_id)
@@ -5845,7 +6040,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             
             # Email content for file-based form - DIRECT LINK to HTA file
             html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
-
+{rfi_question_html_qcr}
     <!-- HEADER -->
     <h2 style="color:#444; margin-bottom:6px;">
         [LEB] {item['identifier']} - Ready for Your Review {f'(v{current_version})' if is_revision else ''}
@@ -6016,7 +6211,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             qcr_button_text = "OPEN QC REVIEW FORM"
         
         html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
-
+{rfi_question_html_qcr}
     <!-- HEADER -->
     <h2 style="color:#444; margin-bottom:6px;">
         [LEB] {item['identifier']} – Ready for Your Review {f'(v{current_version})' if is_revision else ''}
@@ -6289,6 +6484,15 @@ def send_qcr_version_update_email(item_id, version):
     if history:
         history_parts = [f"v{h['version']} ({h['submitted_at'][:16].replace('T', ' ')})" for h in history]
         version_history_html = f"<p><strong>Previous versions:</strong> {', '.join(history_parts)}</p>"
+    
+    # Get all reviewer emails for CC (single or multi-reviewer mode)
+    all_reviewer_emails = []
+    if item['multi_reviewer_mode']:
+        cursor.execute('SELECT reviewer_email FROM item_reviewers WHERE item_id = ?', (item_id,))
+        reviewers = cursor.fetchall()
+        all_reviewer_emails = [r['reviewer_email'] for r in reviewers if r['reviewer_email']]
+    elif item['reviewer_email']:
+        all_reviewer_emails = [item['reviewer_email']]
     
     conn.close()
     
@@ -6569,13 +6773,38 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
         WHERE i.id = ?
     ''', (item_id,))
     item = cursor.fetchone()
-    conn.close()
     
     if not item:
+        conn.close()
         return {'success': False, 'error': 'Item not found'}
+    
+    # For items without initial_reviewer_id set, check item_reviewers table
+    reviewer_names_display = item['reviewer_name'] or 'N/A'
+    all_reviewer_emails_for_cc = []
+    
+    # Check if using item_reviewers table (multi-reviewer mode OR initial_reviewer_id is NULL)
+    if item['multi_reviewer_mode'] or not item['reviewer_name']:
+        cursor.execute('SELECT reviewer_name, reviewer_email FROM item_reviewers WHERE item_id = ?', (item_id,))
+        reviewers = cursor.fetchall()
+        if reviewers:
+            reviewer_names_display = ', '.join([r['reviewer_name'] for r in reviewers])
+            all_reviewer_emails_for_cc = [r['reviewer_email'] for r in reviewers if r['reviewer_email']]
+    
+    # If still no reviewers found and we have the single reviewer email, use that
+    if reviewer_names_display == 'N/A' and item['reviewer_email']:
+        reviewer_names_display = item['reviewer_name'] or item['reviewer_email']
+        all_reviewer_emails_for_cc = [item['reviewer_email']]
+    elif not all_reviewer_emails_for_cc and item['reviewer_email']:
+        all_reviewer_emails_for_cc = [item['reviewer_email']]
+    
+    conn.close()
+    
     
     # Get version info
     version = item['reviewer_response_version'] if item['reviewer_response_version'] is not None else 1
+    
+    # Check if this is an RFI (no response category)
+    is_rfi = (item['type'] or '').upper() == 'RFI'
     
     # Build comparison section
     original_category = item['reviewer_response_category'] or 'Not specified'
@@ -6602,15 +6831,15 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
         except:
             final_files = item['final_response_files']
     
-    # Determine if there were changes
-    category_changed = original_category != final_category_display
+    # Determine if there were changes (skip category for RFI)
+    category_changed = (not is_rfi) and (original_category != final_category_display)
     text_changed = original_text.strip() != final_text_display.strip()
     files_changed = original_files != final_files
     has_changes = category_changed or text_changed or files_changed
     
     # Build the changes summary
     changes_list = []
-    if category_changed:
+    if category_changed:  # Only for non-RFI items
         changes_list.append(f'Category: "{original_category}" → "{final_category_display}"')
     if text_changed:
         changes_list.append('Response text was modified')
@@ -6637,6 +6866,15 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
     if item['qcr_internal_notes']:
         qcr_internal_notes_html = item['qcr_internal_notes'].replace('\n', '<br>')
     
+    # Build category row HTML (only for non-RFI items)
+    category_row_html = ""
+    if not is_rfi:
+        category_row_html = f"""<tr>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold;">Category</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #fef2f2;' if category_changed else ''}">{original_category}</td>
+                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #f0fdf4;' if category_changed else ''}">{final_category_display}</td>
+            </tr>"""
+    
     # Build comparison HTML
     comparison_html = f"""
     <div style="margin: 20px 0;">
@@ -6648,11 +6886,7 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
                 <th style="text-align: left; padding: 10px; border: 1px solid #e5e7eb;">Original (Reviewer v{version})</th>
                 <th style="text-align: left; padding: 10px; border: 1px solid #e5e7eb;">Final (QC {qc_action})</th>
             </tr>
-            <tr>
-                <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold;">Category</td>
-                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #fef2f2;' if category_changed else ''}">{original_category}</td>
-                <td style="padding: 10px; border: 1px solid #e5e7eb; {'background: #f0fdf4;' if category_changed else ''}">{final_category_display}</td>
-            </tr>
+            {category_row_html}
             <tr>
                 <td style="padding: 10px; border: 1px solid #e5e7eb; font-weight: bold; vertical-align: top;">Response Text</td>
                 <td style="padding: 10px; border: 1px solid #e5e7eb; vertical-align: top; {'background: #fef2f2;' if text_changed else ''}">{original_text.replace(chr(10), '<br>')}</td>
@@ -6684,14 +6918,14 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Identifier:</td><td>{item['identifier']}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Contractor Due Date:</td><td>{item['due_date'] or 'N/A'}</td></tr>
-<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Initial Reviewer:</td><td>{item['reviewer_name'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Initial Reviewer:</td><td>{reviewer_names_display}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">QC Reviewer:</td><td>{item['qcr_name'] or 'N/A'}</td></tr>
 </table>
 
 <div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 15px; margin: 20px 0;">
 <h3 style="margin: 0 0 10px 0; color: {action_color};">{action_display}</h3>
 <p>{action_description}</p>
-<p><strong>Final Category:</strong> {final_category_display}</p>
+{f'<p><strong>Final Category:</strong> {final_category_display}</p>' if not is_rfi else ''}
 </div>
 
 {comparison_html}
@@ -6720,17 +6954,16 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
             outlook = win32com.client.Dispatch("Outlook.Application")
             mail = outlook.CreateItem(0)
             
-            # Send to both QCR and reviewer
-            recipients = []
-            if item['qcr_email']:
-                recipients.append(item['qcr_email'])
-            if item['reviewer_email']:
-                recipients.append(item['reviewer_email'])
+            # Send to QCR (primary recipient)
+            if not item['qcr_email']:
+                return {'success': False, 'error': 'No QCR email found'}
             
-            if not recipients:
-                return {'success': False, 'error': 'No recipients found'}
+            mail.To = item['qcr_email']
             
-            mail.To = '; '.join(recipients)
+            # CC all reviewers (from either single reviewer or item_reviewers table)
+            if all_reviewer_emails_for_cc:
+                mail.CC = '; '.join(all_reviewer_emails_for_cc)
+            
             mail.Subject = subject
             mail.HTMLBody = html_body
             mail.Send()
@@ -6852,11 +7085,18 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
             return ''
         return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
     
+    # Escape special characters for HTML content
+    def html_escape(s):
+        if not s:
+            return ''
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
     # Replace placeholders - use reviewer info from item_reviewers record
     html = template.replace('{{ITEM_ID}}', str(item['id']))
     html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
     html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
     html = html.replace('{{REVIEWER_DUE_DATE}}', reviewer_due)
     html = html.replace('{{QCR_DUE_DATE}}', qcr_due)
@@ -6865,8 +7105,9 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
     html = html.replace('{{REVIEWER_EMAIL}}', reviewer_record['reviewer_email'] or '')
     html = html.replace('{{TOKEN}}', reviewer_record['email_token'] or '')
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']) or '')
-    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', html_escape(item['folder_link'] or ''))
     html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or 'N/A'))
+    html = html.replace('{{IS_RFI}}', 'true' if item_type == 'RFI' else 'false')
     html = html.replace('{{OTHER_REVIEWERS_SECTION}}', other_reviewers_html)
     
     # Save to Responses subfolder with reviewer-specific name
@@ -6921,6 +7162,9 @@ def send_multi_reviewer_assignment_emails(item_id):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Convert to dict for easier handling (supports .get() method)
+    item = dict(item)
+    
     # Get all reviewers
     cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
     reviewers = cursor.fetchall()
@@ -6931,6 +7175,7 @@ def send_multi_reviewer_assignment_emails(item_id):
     
     # Check if single reviewer mode (for email language)
     is_single_reviewer = len(reviewers) == 1
+    print(f"  [Send Emails] Item {item_id}: {len(reviewers)} reviewers, is_single_reviewer={is_single_reviewer}")
     
     # Ensure multi_reviewer_mode flag is correct based on actual count
     correct_mode = 0 if is_single_reviewer else 1
@@ -6983,6 +7228,24 @@ def send_multi_reviewer_assignment_emails(item_id):
     folder_path = item['folder_link'] or 'Not set'
     use_file_form = is_local_mode() and folder_path != 'Not set'
     
+    # Create clickable folder link for single reviewer mode
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4; text-decoration:underline;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
+    # Build folder path section - only for single reviewer
+    folder_section_html = ""
+    if is_single_reviewer:
+        folder_section_html = f"""
+    <!-- FILE PATH SECTION -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Designated Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>"""
+    
     sent_count = 0
     errors = []
     
@@ -7010,6 +7273,31 @@ def send_multi_reviewer_assignment_emails(item_id):
         <div style="font-size:13px; color:#333; line-height:1.6; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
     </div>"""
             
+            # Build Bluebeam instructions section - only for multi-reviewer mode
+            # Single reviewer gets file markup instructions instead
+            if is_single_reviewer:
+                print(f"    Using FILE MARKUP instructions for {reviewer['reviewer_name']}")
+                markup_instructions_html = """
+    <!-- FILE MARKUP INSTRUCTIONS -->
+    <div style="margin:15px 0; padding:15px; background:#e8f5e9; border:1px solid #4caf50; border-radius:8px;">
+        <div style="font-size:14px; color:#2e7d32; font-weight:bold;">📁 Markup Instructions</div>
+        <div style="font-size:13px; color:#2e7d32; margin-top:8px;">
+            <strong>Provide markups in the designated folder.</strong><br/>
+            Save your marked-up files to the item folder and select them when submitting your response.
+        </div>
+    </div>"""
+            else:
+                print(f"    Using BLUEBEAM instructions for {reviewer['reviewer_name']}")
+                markup_instructions_html = """
+    <!-- BLUEBEAM INSTRUCTIONS -->
+    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
+            <strong>Provide markups in the corresponding Bluebeam session.</strong><br/>
+            Do not attach files to your response. All markups should be completed in the shared Bluebeam Studio session.
+        </div>
+    </div>"""
+            
             if use_file_form:
                 # Generate the HTA form file for this reviewer
                 form_result = generate_multi_reviewer_form(item_id, dict(reviewer))
@@ -7030,14 +7318,7 @@ def send_multi_reviewer_assignment_emails(item_id):
 
     {rfi_question_html}
 
-    <!-- BLUEBEAM INSTRUCTIONS -->
-    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
-        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
-        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
-            <strong>Provide markups in the corresponding Bluebeam session.</strong><br/>
-            Do not attach files to your response. All markups should be completed in the shared Bluebeam Studio session.
-        </div>
-    </div>
+    {markup_instructions_html}
 
     <!-- DIRECT LINK TO FORM - PROMINENT BUTTON -->
     <div style="margin:20px 0; text-align:center;">
@@ -7114,6 +7395,8 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
     </table>
 
+    {folder_section_html}
+
     <!-- QCR NOTE -->
     <p style="margin-top:16px; font-size:13px; color:#555;">
         {qcr_note_text}
@@ -7146,14 +7429,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         You have been assigned a new review task. Please review the details below.
     </p>
 
-    <!-- BLUEBEAM INSTRUCTIONS -->
-    <div style="margin:15px 0; padding:15px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
-        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📐 Markups Instructions</div>
-        <div style="font-size:13px; color:#1e40af; margin-top:8px;">
-            <strong>Provide markups in the corresponding Bluebeam session.</strong><br/>
-            Do not attach files to your response. All markups should be completed in the shared Bluebeam Studio session.
-        </div>
-    </div>
+    {markup_instructions_html}
 
     <!-- ACTION BUTTON -->
     <div style="margin:20px 0; text-align:center;">
@@ -7216,6 +7492,8 @@ def send_multi_reviewer_assignment_emails(item_id):
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
     </table>
+
+    {folder_section_html}
 
     <!-- QCR NOTE -->
     <p style="margin-top:16px; font-size:13px; color:#555;">
@@ -7348,9 +7626,10 @@ def send_multi_reviewer_assignment_emails(item_id):
         cursor.execute('''
             UPDATE item SET 
                 status = 'Assigned',
-                reviewer_response_status = 'Emails Sent'
+                reviewer_response_status = 'Emails Sent',
+                reviewer_email_sent_at = ?
             WHERE id = ?
-        ''', (item_id,))
+        ''', (datetime.now().isoformat(), item_id))
         conn.commit()
     
     conn.close()
@@ -7429,6 +7708,12 @@ def generate_multi_reviewer_qcr_form(item_id):
         if not s:
             return ''
         return s.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'").replace('\n', '\\n').replace('\r', '')
+    
+    # Escape special characters for HTML content
+    def html_escape(s):
+        if not s:
+            return ''
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     # Start with the template
     html = template
@@ -7513,6 +7798,7 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{ITEM_TYPE}}', item['type'] or '')
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
+    html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
     html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
     html = html.replace('{{PRIORITY}}', item['priority'] or 'Normal')
     html = html.replace('{{QCR_NAME}}', item['qcr_name'] or 'N/A')
@@ -7520,8 +7806,9 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
     html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']))
-    html = html.replace('{{FOLDER_PATH_RAW}}', item['folder_link'] or '')
+    html = html.replace('{{FOLDER_PATH_RAW}}', html_escape(item['folder_link'] or ''))
     html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or 'N/A'))
+    html = html.replace('{{IS_RFI}}', 'true' if (item['type'] or '').upper() == 'RFI' else 'false')
     html = html.replace('{{TOKEN}}', item['email_token_qcr'] or '')
     
     # Save to item folder
@@ -8055,6 +8342,9 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
         conn.close()
         return {'success': False, 'error': 'Item not found'}
     
+    # Check if this is an RFI (no response category)
+    is_rfi = (item['type'] or '').upper() == 'RFI'
+    
     # Get ALL reviewers (not just those who needed response)
     cursor.execute('SELECT * FROM item_reviewers WHERE item_id = ?', (item_id,))
     reviewers = cursor.fetchall()
@@ -8073,13 +8363,23 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
         # Show full internal notes without truncation
         internal_notes = r['internal_notes'] or ''
         notes_html = internal_notes.replace('\n', '<br>') if internal_notes else '<span style="color:#999;">No comments</span>'
+        
+        # Build category cell (only for non-RFI)
+        category_cell = f'<td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>' if not is_rfi else ''
+        
         reviewer_summary += f"""
         <tr>
             <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{idx}</td>
             <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{r['reviewer_name']}</td>
-            <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:10px; font-size:12px;">{category}</span></td>
+            {category_cell}
             <td style="padding:10px; border:1px solid #e5e7eb; vertical-align:top;">{notes_html}</td>
         </tr>"""
+    
+    # Build category header for reviewer table (only for non-RFI)
+    category_header = '<th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:120px;">Category</th>' if not is_rfi else ''
+    
+    # Build final category row (only for non-RFI)
+    final_category_row = f'<tr><td style="padding:5px 0; color:#666; width:140px;">Category:</td><td style="font-weight:600; color:#166534;">{final_category}</td></tr>' if not is_rfi else ''
     
     subject = f"[LEB] {item['identifier']} – QC Review Complete ✅"
     
@@ -8105,7 +8405,7 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
         <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:15px; margin:15px 0;">
             <h4 style="margin:0 0 10px 0; color:#166534;">📋 Final Response</h4>
             <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                <tr><td style="padding:5px 0; color:#666; width:140px;">Category:</td><td style="font-weight:600; color:#166534;">{final_category}</td></tr>
+                {final_category_row}
                 <tr><td style="padding:5px 0; color:#666; vertical-align:top;">Response:</td><td>{final_text.replace(chr(10), '<br>') if final_text else 'N/A'}</td></tr>
             </table>
         </div>
@@ -8116,7 +8416,7 @@ def send_multi_reviewer_completion_email(item_id, final_category, final_text):
                 <tr style="background:#f1f5f9;">
                     <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:40px;">#</th>
                     <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:140px;">Reviewer</th>
-                    <th style="padding:10px; border:1px solid #e5e7eb; text-align:left; width:120px;">Category</th>
+                    {category_header}
                     <th style="padding:10px; border:1px solid #e5e7eb; text-align:left;">Comments</th>
                 </tr>
                 {reviewer_summary}
@@ -8920,12 +9220,15 @@ def api_close_item(item_id):
         conn.close()
         return jsonify({'error': 'Not authorized to close this item'}), 403
     
-    # Validate closeout requirements
-    if not item['response_category']:
+    # Validate closeout requirements - check both legacy and final response fields
+    response_category = item['response_category'] or item['final_response_category']
+    response_text = item['response_text'] or item['final_response_text']
+    
+    if not response_category:
         conn.close()
         return jsonify({'error': 'Response category is required before closing'}), 400
     
-    if not item['response_text']:
+    if not response_text:
         conn.close()
         return jsonify({'error': 'Response text is required before closing'}), 400
     
@@ -10727,6 +11030,9 @@ def respond_multi_qcr_submit():
         
         conn.commit()
         conn.close()
+        
+        # Send completion confirmation email to QCR and all reviewers
+        send_multi_reviewer_completion_email(item_id, response_category, response_text)
         
         # Create notification
         create_notification(

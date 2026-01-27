@@ -198,6 +198,12 @@
             <p style="margin-top: 8px;">Do not attach files here. All markups should be completed in the shared Bluebeam Studio session for this item.</p>
         </div>
 
+        <!-- RFI Question Section (shown only for RFI items) -->
+        <div id="rfi-question-section" class="info-box" style="background: #fff8e1; border: 2px solid #ffc107; display: none;">
+            <div style="font-size: 15px; color: #f57c00; font-weight: bold; margin-bottom: 10px;">&#10067; RFI Question</div>
+            <div id="rfi-question-text" style="font-size: 14px; color: #333; line-height: 1.6; white-space: pre-wrap;">{{RFI_QUESTION}}</div>
+        </div>
+
         <div id="success-message" class="success-box hidden"></div>
 
         <form id="response-form">
@@ -231,11 +237,23 @@
             token: "{{TOKEN}}",
             reviewer_name: "{{REVIEWER_NAME}}",
             reviewer_email: "{{REVIEWER_EMAIL}}",
-            folder_path: "{{FOLDER_PATH}}"
+            folder_path: "{{FOLDER_PATH}}",
+            is_rfi: {{IS_RFI}}
         };
         
         var fso = new ActiveXObject("Scripting.FileSystemObject");
         var shell = new ActiveXObject("WScript.Shell");
+
+        // Initialize on load
+        window.onload = function() {
+            // Show RFI question section if this is an RFI
+            if (ITEM_CONFIG.is_rfi) {
+                var rfiSection = document.getElementById("rfi-question-section");
+                if (rfiSection) {
+                    rfiSection.style.display = "block";
+                }
+            }
+        };
 
         function submitResponse() {
             var category = document.getElementById('response_category').value;
