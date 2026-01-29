@@ -2611,6 +2611,93 @@ def is_user_in_rfi_reviewers(body, user_names):
     
     return False
 
+def parse_submittal_approvers(body):
+    """Extract the list of Approvers/Workflow Members from an ACC Submittal email.
+    
+    ACC Submittal emails typically have workflow members listed in various formats:
+    - 'Approvers' field
+    - 'Workflow Members' field
+    - 'Current Approver' field
+    - 'Assigned To' field
+    
+    Returns a list of approver names (without company info).
+    """
+    if not body:
+        return []
+    
+    approvers = []
+    
+    # Patterns to match various ACC submittal fields that indicate assignment
+    patterns = [
+        # "Approvers    Name1 (Company1), Name2 (Company2)"
+        r'(?:^|\n)\s*Approvers?[:\s\t]+(.+?)(?=\n\s*(?:Due|Status|Submitted|Spec|$|\n\n))',
+        # "Current Approver    Name (Company)"
+        r'(?:^|\n)\s*Current\s+Approver[:\s\t]+(.+?)(?=\n|$)',
+        # "Workflow Members    Name1, Name2"
+        r'(?:^|\n)\s*Workflow\s+Members?[:\s\t]+(.+?)(?=\n\s*(?:Due|Status|$|\n\n))',
+        # "Assigned To    Name (Company)"
+        r'(?:^|\n)\s*Assigned\s+To[:\s\t]+(.+?)(?=\n|$)',
+        # "Reviewer    Name" (some submittals use this)
+        r'(?:^|\n)\s*Reviewers?[:\s\t]+(.+?)(?=\n\s*(?:Due|Status|Co-reviewers|Watchers|$|\n\n))',
+    ]
+    
+    for pattern in patterns:
+        matches = re.finditer(pattern, body, re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            approver_text = match.group(1).strip()
+            # Split by comma and extract names
+            # Format: "Name (Company), Name2 (Company2)"
+            parts = approver_text.split(',')
+            for part in parts:
+                part = part.strip()
+                # Extract just the name (before the parentheses)
+                name_match = re.match(r'([^(]+)', part)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    if name and len(name) > 1:  # Avoid single characters
+                        approvers.append(name)
+    
+    return approvers
+
+def is_user_in_submittal_approvers(body, user_names):
+    """Check if the current user is listed as an Approver/Workflow Member in the Submittal email.
+    
+    Args:
+        body: The email body text
+        user_names: List of user name patterns to match (e.g., ['Isabel Andaya', 'Andaya'])
+    
+    Returns:
+        True if user is found in approvers list, False otherwise
+    """
+    if not body or not user_names:
+        return False
+    
+    approvers = parse_submittal_approvers(body)
+    
+    # Also check if the email body contains phrases indicating direct assignment
+    assignment_phrases = [
+        'was assigned to you',
+        'assigned to your role',
+        'needs your review',
+        'requires your action',
+        'awaiting your approval',
+        'pending your review',
+    ]
+    
+    body_lower = body.lower()
+    for phrase in assignment_phrases:
+        if phrase in body_lower:
+            return True
+    
+    # Check if user is in the approvers list
+    for user_name in user_names:
+        user_name_lower = user_name.lower()
+        for approver in approvers:
+            if user_name_lower in approver.lower():
+                return True
+    
+    return False
+
 def sanitize_folder_name(name):
     """Create a filesystem-safe folder name."""
     # Remove or replace invalid characters
@@ -2929,11 +3016,15 @@ def process_reviewer_response_json(json_path):
         cursor.execute('SELECT id, reviewer_response_version FROM item WHERE email_token_reviewer = ?', (token,))
         item = cursor.fetchone()
         
+        # Track if this came from item_reviewers table (for updating that record too)
+        item_reviewer_id = None
+        
         # If not found in item table, check item_reviewers table (multi-reviewer mode)
         if not item:
-            cursor.execute('SELECT item_id FROM item_reviewers WHERE email_token = ?', (token,))
+            cursor.execute('SELECT id, item_id FROM item_reviewers WHERE email_token = ?', (token,))
             reviewer_row = cursor.fetchone()
             if reviewer_row:
+                item_reviewer_id = reviewer_row['id']
                 # Get item details
                 cursor.execute('SELECT id, reviewer_response_version FROM item WHERE id = ?', (reviewer_row['item_id'],))
                 item = cursor.fetchone()
@@ -2983,6 +3074,25 @@ def process_reviewer_response_json(json_path):
             current_version,
             item_id
         ))
+        
+        # If this response came from item_reviewers, also update that record
+        if item_reviewer_id:
+            cursor.execute('''
+                UPDATE item_reviewers SET
+                    response_at = ?,
+                    response_category = ?,
+                    internal_notes = ?,
+                    response_version = ?,
+                    needs_response = 0
+                WHERE id = ?
+            ''', (
+                data.get('_submitted_at', datetime.now().isoformat()),
+                data.get('response_category'),
+                data.get('internal_notes'),
+                current_version,
+                item_reviewer_id
+            ))
+            print(f"  [Watcher] Also updated item_reviewers record {item_reviewer_id}")
         
         conn.commit()
         conn.close()
@@ -4775,6 +4885,14 @@ class EmailPoller:
                                 continue
                         # Extract the RFI question
                         rfi_question = parse_rfi_question(body)
+                    
+                    # For Submittals, only process if user is listed as an Approver/Reviewer
+                    if item_type == 'Submittal':
+                        user_names = CONFIG.get('user_names', [])
+                        if user_names:
+                            if not is_user_in_submittal_approvers(body, user_names):
+                                print(f"  [Submittal Skip] {identifier} - user not in Approvers list")
+                                continue
                     
                     bucket = determine_bucket(subject)
                     title = parse_title(subject, identifier, body)
