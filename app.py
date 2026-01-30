@@ -2268,8 +2268,10 @@ def init_db():
         ('previous_title', 'TEXT'),  # Store old title before update
         ('previous_priority', 'TEXT'),  # Store old priority before update
         ('update_email_body', 'TEXT'),  # Store relevant portion of update email
+        ('update_email_entry_id', 'TEXT'),  # Entry ID to open the update email in Outlook
         ('reopened_from_closed', 'INTEGER DEFAULT 0'),  # If item was reopened from Closed
         ('status_before_update', 'TEXT'),  # Status before the update came in
+        ('reopen_count', 'INTEGER DEFAULT 0'),  # How many times item has been reopened (R2, R3, etc.)
     ]
     for col_name, col_def in acc_update_columns:
         try:
@@ -2761,11 +2763,14 @@ def generate_reviewer_form_html(item_id):
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
         WHERE i.id = ?
     ''', (item_id,))
-    item = cursor.fetchone()
+    item_row = cursor.fetchone()
     
-    if not item:
+    if not item_row:
         conn.close()
         return {'success': False, 'error': 'Item not found'}
+    
+    # Convert to dict for .get() access
+    item = dict(item_row)
     
     if not item['folder_link']:
         conn.close()
@@ -2838,8 +2843,13 @@ def generate_reviewer_form_html(item_id):
     html = html.replace('{{IS_RFI}}', 'true' if (item['type'] or '').upper() == 'RFI' else 'false')
     
     # Save to Responses subfolder (use .hta extension if HTA template, else .html)
+    # Use versioned folder names for reopened items (Responses R2, Responses R3, etc.)
     folder_path = Path(item['folder_link'])
-    responses_folder = folder_path / "Responses"
+    reopen_count = item.get('reopen_count') or 0
+    if reopen_count > 0:
+        responses_folder = folder_path / f"Responses R{reopen_count + 1}"
+    else:
+        responses_folder = folder_path / "Responses"
     
     # Create Responses subfolder if it doesn't exist
     try:
@@ -2972,8 +2982,13 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{IS_RFI}}', 'true' if (item['type'] or '').upper() == 'RFI' else 'false')
     
     # Save to Responses subfolder (use .hta extension if HTA template, else .html)
+    # Use versioned folder names for reopened items (Responses R2, Responses R3, etc.)
     folder_path = Path(item['folder_link'])
-    responses_folder = folder_path / "Responses"
+    reopen_count = item.get('reopen_count') or 0
+    if reopen_count > 0:
+        responses_folder = folder_path / f"Responses R{reopen_count + 1}"
+    else:
+        responses_folder = folder_path / "Responses"
     
     # Create Responses subfolder if it doesn't exist
     try:
@@ -4000,7 +4015,21 @@ def get_items_needing_reminders():
         if is_local_mode() and check_response_exists_local(item['id'], 'reviewer'):
             continue  # Response already exists
         
-        if item['reviewer_email']:
+        # If no reviewer_email from user table, check item_reviewers as fallback
+        reviewer_email = item['reviewer_email']
+        if not reviewer_email:
+            cursor.execute('''
+                SELECT reviewer_email, reviewer_name FROM item_reviewers
+                WHERE item_id = ? AND needs_response = 1
+                LIMIT 1
+            ''', (item['id'],))
+            fallback = cursor.fetchone()
+            if fallback:
+                reviewer_email = fallback['reviewer_email']
+                item['reviewer_email'] = reviewer_email
+                item['reviewer_name'] = fallback['reviewer_name']
+        
+        if reviewer_email:
             result['single_reviewer'].append((item, 'reviewer', due_date, reminder_stage))
     
     # Get items where QCR hasn't responded and QCR due date is today or yesterday
@@ -4964,20 +4993,28 @@ class EmailPoller:
                                     has_pending_update = 1,
                                     update_type = ?,
                                     update_detected_at = ?,
+                                    due_date = ?,
                                     previous_due_date = ?,
+                                    title = ?,
                                     previous_title = ?,
+                                    priority = ?,
                                     previous_priority = ?,
                                     update_email_body = ?,
+                                    update_email_entry_id = ?,
                                     reopened_from_closed = ?,
                                     status_before_update = ?,
                                     last_email_at = ?
                                 WHERE id = ?
                             ''', (
                                 update_type, received_at,
+                                due_date if due_date_changed else existing_due,  # Update to new due date
                                 existing_due if due_date_changed else None,
+                                title if title_changed else existing_title,  # Update to new title
                                 existing_title if title_changed else None,
+                                priority if priority_changed else existing_priority,  # Update to new priority
                                 existing_priority if priority_changed else None,
                                 body[:1000],
+                                message_id,  # Store the email entry ID for opening
                                 1 if was_closed else 0,
                                 current_status,
                                 received_at,
@@ -5782,13 +5819,14 @@ def send_due_date_update_email(item_id, recipient_type, new_due_date, admin_note
         pythoncom.CoUninitialize()
 
 
-def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
+def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previous_response=None):
     """Send email to reviewer(s) notifying them the workflow is restarting due to content changes.
     
     Args:
         item_id: The item ID
         admin_note: Admin's note about what changed
         was_closed: Whether the item was previously closed
+        previous_response: Dict with 'category', 'text', 'files' from before clearing (for closed items)
     """
     if not HAS_WIN32COM:
         return {'success': False, 'error': 'Outlook not available'}
@@ -5816,7 +5854,7 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
     is_multi = item['multi_reviewer_mode']
     
     if is_multi:
-        # Get all reviewers
+        # Get all reviewers from item_reviewers table
         cursor.execute('''
             SELECT reviewer_name, reviewer_email, email_token
             FROM item_reviewers
@@ -5824,12 +5862,22 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
         ''', (item_id,))
         reviewers = cursor.fetchall()
     else:
-        # Single reviewer
+        # Single reviewer - try from user join first
         reviewers = [{
             'reviewer_name': item['reviewer_name'],
             'reviewer_email': item['reviewer_email'],
             'email_token': item['email_token_reviewer']
         }] if item['reviewer_email'] else []
+    
+    # Fallback: check item_reviewers table even if not multi_reviewer_mode
+    # This handles cases where reviewer is in item_reviewers but mode is 0
+    if not reviewers:
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, email_token
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = cursor.fetchall()
     
     if not reviewers:
         conn.close()
@@ -5843,6 +5891,27 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
         folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4;">{folder_path}</a>'
     else:
         folder_link_html = 'Not set'
+    
+    # Build previous response section for closed items
+    # Use the passed previous_response data (before DB was cleared), or fall back to item data
+    previous_response_html = ''
+    prev_category = previous_response.get('category') if previous_response else item['final_response_category']
+    prev_text = previous_response.get('text') if previous_response else item['final_response_text']
+    prev_files = previous_response.get('files') if previous_response else item['final_response_files']
+    
+    if was_closed and prev_category:
+        previous_response_html = f'''
+    <!-- PREVIOUS RESPONSE -->
+    <div style="margin:15px 0; padding:15px; background:#f0fdf4; border:2px solid #22c55e; border-radius:8px;">
+        <div style="font-size:14px; color:#166534; font-weight:bold;">📄 Our Previous Response (when item was closed):</div>
+        <div style="margin-top:10px;">
+            <div style="font-size:13px; color:#166534;">
+                <strong>Response Category:</strong> {prev_category}
+            </div>
+            {f'<div style="font-size:13px; color:#166534; margin-top:6px;"><strong>Comments:</strong> {prev_text}</div>' if prev_text else ''}
+            {f'<div style="font-size:13px; color:#166534; margin-top:6px;"><strong>Files:</strong> {prev_files}</div>' if prev_files else ''}
+        </div>
+    </div>'''
     
     # Build status message
     if was_closed:
@@ -5906,7 +5975,8 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
     <div style="margin:10px 0; padding:10px; background:#fef2f2; border:1px solid #fecaca; border-radius:8px;">
         <div style="font-size:13px; color:#991b1b;">No specific changes were noted by the administrator. Please review the updated materials carefully.</div>
     </div>'''}
-    </div>
+    
+    {previous_response_html}
 
     <!-- ACTION BUTTON -->
     {f'''<div style="margin:20px 0; text-align:center;">
@@ -5953,7 +6023,9 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">
+                {f"{format_date_for_email(item['previous_due_date'])} → " if item['previous_due_date'] and item['previous_due_date'] != item['due_date'] else ""}{format_date_for_email(item['due_date'])}
+            </td>
         </tr>
     </table>
 
@@ -8936,9 +9008,9 @@ def api_get_item(item_id):
         WHERE i.id = ?
     ''', (item_id,))
     item = cursor.fetchone()
-    conn.close()
     
     if not item:
+        conn.close()
         return jsonify({'error': 'Item not found'}), 404
     
     item_dict = dict(item)
@@ -8948,6 +9020,20 @@ def api_get_item(item_id):
     item_dict['qcr_due_status'] = get_due_date_status(item_dict.get('qcr_due_date'))
     item_dict['contractor_due_status'] = get_due_date_status(item_dict.get('due_date'))
     
+    # If item has been reopened, get previous response history
+    if item_dict.get('reopen_count', 0) > 0:
+        cursor.execute('''
+            SELECT detected_at, action_taken, admin_note,
+                   previous_response_category, previous_response_text, previous_response_files
+            FROM item_update_history
+            WHERE item_id = ? AND action_taken = 'workflow_restarted'
+                  AND previous_response_category IS NOT NULL
+            ORDER BY detected_at DESC
+        ''', (item_id,))
+        prev_responses = [dict(row) for row in cursor.fetchall()]
+        item_dict['previous_responses'] = prev_responses
+    
+    conn.close()
     return jsonify(item_dict)
 
 @app.route('/api/item/<int:item_id>', methods=['POST', 'PUT'])
@@ -9529,6 +9615,48 @@ def api_open_original_email(item_id):
             pythoncom.CoUninitialize()
     except Exception as e:
         print(f"Error opening email: {e}")
+        return jsonify({'error': f'Could not open email: {str(e)}'}), 500
+
+
+@app.route('/api/item/<int:item_id>/open-update-email', methods=['POST'])
+@login_required
+def api_open_update_email(item_id):
+    """Open the update email in Outlook for an item with a pending update."""
+    if not HAS_WIN32COM:
+        return jsonify({'error': 'Outlook integration not available'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get update_email_entry_id from item table
+    cursor.execute('SELECT update_email_entry_id FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    conn.close()
+    
+    if not item or not item['update_email_entry_id']:
+        return jsonify({'error': 'No update email found for this item'}), 404
+    
+    entry_id = item['update_email_entry_id']
+    
+    try:
+        pythoncom.CoInitialize()
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            namespace = outlook.GetNamespace("MAPI")
+            
+            # Get the email by EntryID
+            mail_item = namespace.GetItemFromID(entry_id)
+            
+            # Get the inspector (window) and activate it to bring to front
+            inspector = mail_item.GetInspector
+            inspector.Activate()
+            mail_item.Display(True)  # True = modal window
+            
+            return jsonify({'success': True, 'message': 'Update email opened in Outlook'})
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        print(f"Error opening update email: {e}")
         return jsonify({'error': f'Could not open email: {str(e)}'}), 500
 
 # =============================================================================
@@ -10438,6 +10566,9 @@ def api_review_update(item_id):
         conn.close()
         return jsonify({'error': 'Item not found'}), 404
     
+    # Convert to dict for .get() access
+    item = dict(item)
+    
     if not item['has_pending_update']:
         conn.close()
         return jsonify({'error': 'No pending update for this item'}), 400
@@ -10561,41 +10692,56 @@ def api_review_update(item_id):
         ]
         params = [now, admin_note, 'Assigned']
         
-        # Clear closed_at if it was closed
+        # Clear closed_at if it was closed and increment reopen_count
         if item['closed_at']:
             updates.append('closed_at = NULL')
+            # Increment reopen_count for versioned response folders
+            current_reopen_count = item.get('reopen_count') or 0
+            updates.append('reopen_count = ?')
+            params.append(current_reopen_count + 1)
+        
+        # Always recalculate review due dates based on current due_date when restarting
+        # This handles both new updates and reopened items
+        current_due_date = item['due_date']
+        date_received = item['date_received']
+        current_priority = item['priority']
         
         # Apply new values if requested
         if apply_new_values and update_history:
             if update_history['new_due_date']:
+                current_due_date = update_history['new_due_date']
                 updates.append('due_date = ?')
-                params.append(update_history['new_due_date'])
-                
-                # Recalculate review due dates
-                date_received = item['date_received']
-                priority = update_history['new_priority'] or item['priority']
-                if date_received:
-                    due_dates = calculate_review_due_dates(
-                        date_received, update_history['new_due_date'], priority
-                    )
-                    updates.extend([
-                        'initial_reviewer_due_date = ?',
-                        'qcr_due_date = ?',
-                        'is_contractor_window_insufficient = ?'
-                    ])
-                    params.extend([
-                        due_dates['initial_reviewer_due_date'],
-                        due_dates['qcr_due_date'],
-                        1 if due_dates['is_contractor_window_insufficient'] else 0
-                    ])
+                params.append(current_due_date)
             
             if update_history['new_title']:
                 updates.append('title = ?')
                 params.append(update_history['new_title'])
             
             if update_history['new_priority']:
+                current_priority = update_history['new_priority']
                 updates.append('priority = ?')
-                params.append(update_history['new_priority'])
+                params.append(current_priority)
+        
+        # Recalculate reviewer due dates based on current contractor due date
+        # Use today as date_received for reopened items to give reviewers time
+        if item['reopened_from_closed']:
+            # For reopened items, use today as the "received" date for calculating reviewer timeline
+            date_received = datetime.now().strftime('%Y-%m-%d')
+        
+        if current_due_date and date_received:
+            due_dates = calculate_review_due_dates(
+                date_received, current_due_date, current_priority
+            )
+            updates.extend([
+                'initial_reviewer_due_date = ?',
+                'qcr_due_date = ?',
+                'is_contractor_window_insufficient = ?'
+            ])
+            params.extend([
+                due_dates['initial_reviewer_due_date'],
+                due_dates['qcr_due_date'],
+                1 if due_dates['is_contractor_window_insufficient'] else 0
+            ])
         
         params.append(item_id)
         cursor.execute(f'''
@@ -10613,19 +10759,33 @@ def api_review_update(item_id):
         ''', (item_id,))
         
         if update_history:
+            # Save previous response to history before it's cleared (for audit trail)
             cursor.execute('''
                 UPDATE item_update_history SET
                     admin_reviewed_at = ?,
                     admin_reviewed_by = ?,
                     admin_note = ?,
-                    action_taken = 'workflow_restarted'
+                    action_taken = 'workflow_restarted',
+                    previous_response_category = ?,
+                    previous_response_text = ?,
+                    previous_response_files = ?
                 WHERE id = ?
-            ''', (now, admin_user_id, admin_note, update_history['id']))
+            ''', (now, admin_user_id, admin_note,
+                  item.get('final_response_category'),
+                  item.get('final_response_text'),
+                  item.get('final_response_files'),
+                  update_history['id']))
         
         # Send restart notification to reviewer(s)
         was_closed = item['reopened_from_closed']
+        # Pass the previous response data that was saved before clearing
+        previous_response = {
+            'category': item.get('final_response_category'),
+            'text': item.get('final_response_text'),
+            'files': item.get('final_response_files')
+        } if was_closed else None
         email_result = send_workflow_restart_email(
-            item_id, admin_note, was_closed
+            item_id, admin_note, was_closed, previous_response
         )
         result['emails_sent'].append({'to': 'reviewer', 'result': email_result})
     

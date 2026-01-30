@@ -450,8 +450,9 @@ function renderItems() {
     const emptyState = document.getElementById('empty-state');
     
     // Separate open and closed items
-    const openItems = state.items.filter(item => !item.closed_at);
-    const closedItems = state.items.filter(item => item.closed_at);
+    // Items with pending updates that were reopened from closed should appear in open section
+    const openItems = state.items.filter(item => !item.closed_at || (item.has_pending_update && item.reopened_from_closed));
+    const closedItems = state.items.filter(item => item.closed_at && !(item.has_pending_update && item.reopened_from_closed));
     
     if (openItems.length === 0 && closedItems.length === 0) {
         tbody.innerHTML = '';
@@ -736,6 +737,9 @@ function populateDetailDrawer(item) {
     // Initialize QCR autocomplete and set value
     initQcrAutocomplete();
     setQcrFromItem(item);
+    
+    // Show previous responses history for reopened items
+    renderPreviousResponses(item);
 }
 
 /**
@@ -770,6 +774,47 @@ function renderComments(comments) {
             <div class="comment-body">${escapeHtml(comment.body)}</div>
         </div>
     `).join('');
+}
+
+/**
+ * Render previous responses history for reopened items
+ */
+function renderPreviousResponses(item) {
+    const section = document.getElementById('previous-responses-section');
+    const list = document.getElementById('previous-responses-list');
+    
+    const reopenCount = item.reopen_count || 0;
+    const previousResponses = item.previous_responses || [];
+    
+    // Show section only if item has been reopened
+    if (reopenCount === 0 && previousResponses.length === 0) {
+        hide(section);
+        return;
+    }
+    
+    show(section);
+    
+    if (previousResponses.length === 0) {
+        list.innerHTML = `<p class="text-muted">This item has been reopened ${reopenCount} time(s). No previous response details recorded.</p>`;
+        return;
+    }
+    
+    list.innerHTML = previousResponses.map((resp, idx) => {
+        const revNum = previousResponses.length - idx;
+        return `
+            <div class="previous-response-card" style="background:#f0fdf4; border:1px solid #22c55e; border-radius:8px; padding:12px; margin-bottom:10px;">
+                <div style="font-weight:bold; color:#166534; margin-bottom:8px;">
+                    📄 Response R${revNum} (before reopen on ${formatDateTime(resp.detected_at)})
+                </div>
+                <div style="font-size:13px; color:#333;">
+                    <div><strong>Category:</strong> ${escapeHtml(resp.previous_response_category || 'N/A')}</div>
+                    ${resp.previous_response_text ? `<div style="margin-top:4px;"><strong>Comments:</strong> ${escapeHtml(resp.previous_response_text)}</div>` : ''}
+                    ${resp.previous_response_files ? `<div style="margin-top:4px;"><strong>Files:</strong> ${escapeHtml(resp.previous_response_files)}</div>` : ''}
+                </div>
+                ${resp.admin_note ? `<div style="margin-top:8px; font-size:12px; color:#6b7280;"><em>Reason for reopen: ${escapeHtml(resp.admin_note)}</em></div>` : ''}
+            </div>
+        `;
+    }).join('');
 }
 
 /**
@@ -903,6 +948,26 @@ async function openOriginalEmail() {
         } else {
             alert(`Could not open email: ${e.message}`);
         }
+    }
+}
+
+/**
+ * Open update email in Outlook (for contractor updates)
+ */
+async function openUpdateEmail(itemId) {
+    try {
+        const result = await api(`/item/${itemId}/open-update-email`, {
+            method: 'POST'
+        });
+        
+        if (result.success) {
+            console.log('Opened update email in Outlook');
+        } else {
+            alert(result.error || 'Could not open update email');
+        }
+    } catch (e) {
+        console.error('Error opening update email:', e);
+        alert(`Could not open update email: ${e.message}`);
     }
 }
 
@@ -2928,16 +2993,25 @@ async function loadReviewerChips(item) {
     // Set up search input
     if (searchInput) {
         searchInput.value = '';
-        searchInput.oninput = () => filterReviewerDropdown(searchInput.value);
-        searchInput.onfocus = () => {
-            filterReviewerDropdown(searchInput.value);
+        searchInput.disabled = false;  // Ensure input is enabled
+        searchInput.removeAttribute('readonly');  // Remove any readonly attribute
+        
+        // Remove old event handlers and add new ones
+        searchInput.oninput = null;
+        searchInput.onfocus = null;
+        
+        searchInput.addEventListener('input', function() {
+            filterReviewerDropdown(this.value);
+        });
+        searchInput.addEventListener('focus', function() {
+            filterReviewerDropdown(this.value);
             dropdown.classList.add('show');
-        };
+        });
     }
     
     // Close dropdown when clicking outside
     document.addEventListener('click', (e) => {
-        if (!e.target.closest('.reviewer-chips-section')) {
+        if (!e.target.closest('.reviewer-chips-container') && !e.target.closest('.reviewer-input-wrapper')) {
             dropdown?.classList.remove('show');
         }
     });
@@ -3390,8 +3464,16 @@ function renderContractorUpdatePanel(item) {
                 ${wasReopened ? '<span style="background:#dc2626;color:white;padding:2px 6px;border-radius:4px;font-size:0.75rem;margin-left:auto;">REOPENED</span>' : ''}
             </div>
             
+            ${item.update_email_entry_id ? `
+            <div style="margin-bottom:0.5rem;">
+                <button class="btn btn-link" onclick="openUpdateEmail(${item.id})" style="padding:0;font-size:0.85rem;color:var(--primary);">
+                    📧 View Update Email in Outlook
+                </button>
+            </div>
+            ` : ''}
+            
             <div class="update-changes">
-                ${changesHtml || '<div class="update-change-item"><span class="label">Update detected:</span> <span class="new-value">${formatDateTime(item.update_detected_at)}</span></div>'}
+                ${changesHtml || `<div class="update-change-item"><span class="label">Update detected:</span> <span class="new-value">${formatDateTime(item.update_detected_at)}</span></div>`}
             </div>
             
             ${item.status_before_update ? `<p style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.5rem;">Status before update: <strong>${item.status_before_update}</strong></p>` : ''}
@@ -3404,7 +3486,7 @@ function renderContractorUpdatePanel(item) {
             <div class="update-actions">
                 ${!isContentChange ? `
                     <button class="btn btn-accept-due-date" onclick="reviewContractorUpdate(${item.id}, 'accept_due_date')">
-                        📅 Accept Due Date Change
+                        📅 Accept Due Date Change${item.due_date ? ` (${formatDate(item.due_date)})` : ''}
                     </button>
                 ` : ''}
                 <button class="btn btn-restart-workflow" onclick="reviewContractorUpdate(${item.id}, 'restart_workflow')">

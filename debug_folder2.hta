@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION ID="DebugApp" APPLICATIONNAME="Debug" SCROLL="yes" SINGLEINSTANCE="yes">
+<script language="JavaScript">
+function debugFolder() {
+    var output = document.getElementById("output");
+    var folderPath = "\\\\sac-filsrv1\\Projects\\Structural-028\\Projects\\LEB\\9.0_Const_Svcs\\Mortenson\\Submittals\\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis";
+    
+    var html = "<b>Folder Path:</b><br>" + folderPath + "<br><br>";
+    
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        html += "<b>FSO Created:</b> YES<br><br>";
+        
+        if (fso.FolderExists(folderPath)) {
+            html += "<b>Folder Exists:</b> YES<br><br>";
+            
+            var folder = fso.GetFolder(folderPath);
+            html += "<b>Got Folder Object:</b> YES<br><br>";
+            
+            // Try SubFolders first
+            html += "<b>SubFolders:</b><br>";
+            var subfolders = new Enumerator(folder.SubFolders);
+            for (; !subfolders.atEnd(); subfolders.moveNext()) {
+                html += "- " + subfolders.item().Name + "<br>";
+            }
+            
+            // Now try Files
+            html += "<br><b>Files (folder.Files):</b><br>";
+            try {
+                var filesCol = folder.Files;
+                html += "Files collection count: " + filesCol.Count + "<br>";
+                var files = new Enumerator(filesCol);
+                var count = 0;
+                for (; !files.atEnd(); files.moveNext()) {
+                    var file = files.item();
+                    html += count + ": " + file.Name + "<br>";
+                    count++;
+                }
+            } catch(e2) {
+                html += "<b style='color:red'>Files ERROR:</b> " + e2.message + "<br>";
+            }
+        } else {
+            html += "<b>Folder Exists:</b> NO<br>";
+        }
+    } catch(e) {
+        html += "<b style='color:red'>ERROR:</b> " + e.message + "<br>";
+    }
+    
+    output.innerHTML = html;
+}
+
+window.onload = debugFolder;
+</script>
+</head>
+<body style="font-family: Arial; padding: 20px;">
+<h2>Debug File Enumeration v2</h2>
+<div id="output">Loading...</div>
+</body>
+</html>

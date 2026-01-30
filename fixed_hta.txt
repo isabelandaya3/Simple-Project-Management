@@ -1,0 +1,462 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Initial Review Response - Submittal #270</title>
+    <HTA:APPLICATION
+        ID="ReviewerResponseForm"
+        APPLICATIONNAME="Reviewer Response"
+        BORDER="dialog"
+        BORDERSTYLE="normal"
+        CAPTION="yes"
+        CONTEXTMENU="yes"
+        MAXIMIZEBUTTON="yes"
+        MINIMIZEBUTTON="yes"
+        SCROLL="yes"
+        SCROLLFLAT="yes"
+        SELECTION="yes"
+        SHOWINTASKBAR="yes"
+        SINGLEINSTANCE="no"
+        SYSMENU="yes"
+        VERSION="1.0"
+        WINDOWSTATE="normal"
+    />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+        }
+        h1 {
+            color: #1a1a2e;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .info-row {
+            display: flex;
+            margin-bottom: 8px;
+        }
+        .info-row:last-child { margin-bottom: 0; }
+        .info-label {
+            font-weight: 600;
+            color: #444;
+            width: 160px;
+            flex-shrink: 0;
+        }
+        .info-value { color: #666; }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin-bottom: 12px;
+        }
+        .form-group { margin-bottom: 20px; }
+        label {
+            display: block;
+            font-weight: 500;
+            color: #444;
+            margin-bottom: 6px;
+        }
+        select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
+        }
+        textarea { resize: vertical; min-height: 100px; }
+        
+        .file-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .file-list {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 12px;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            background: white;
+        }
+        .file-item:hover { background: #e9ecef; }
+        .file-item input[type="checkbox"] { 
+            margin-right: 10px; 
+            width: 18px;
+            height: 18px;
+        }
+        .file-item label {
+            margin-bottom: 0;
+            font-weight: normal;
+            color: #333;
+            cursor: pointer;
+            word-break: break-all;
+            flex: 1;
+        }
+        .remove-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        .remove-btn:hover { background: #c82333; }
+        
+        .btn {
+            display: inline-block;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        .btn:hover {
+            opacity: 0.9;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .file-picker-btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .file-picker-btn:hover { background: #5a6fd6; }
+        
+        .success-box {
+            background: #d4edda;
+            border: 1px solid #28a745;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            color: #155724;
+            text-align: center;
+        }
+        .hidden { display: none !important; }
+        
+        .folder-info {
+            background: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        .folder-info strong { color: #004085; }
+        .folder-path {
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            background: #f8f9fa;
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+            display: block;
+        }
+        .open-folder-btn {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .open-folder-btn:hover { background: #138496; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Initial Review Response</h1>
+        <p class="subtitle">Submittal Submittal #270</p>
+        
+        <div class="info-box">
+            <div class="info-row">
+                <span class="info-label">Title:</span>
+                <span class="info-value">LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations &amp; Gravity Beam Analysis</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Date Received:</span>
+                <span class="info-value">N/A</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Your Due Date:</span>
+                <span class="info-value" style="color: #2980b9; font-weight: bold;">2026-01-28</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">QCR Due Date:</span>
+                <span class="info-value">2026-01-30</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Contractor Due:</span>
+                <span class="info-value" style="color: #c0392b; font-weight: bold;">2026-02-01</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Reviewer:</span>
+                <span class="info-value">Iyer, Padmanabhan</span>
+            </div>
+        </div>
+
+        <div class="folder-info">
+            <strong>Item Folder:</strong>
+            <span class="folder-path" id="folder-path">\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\Mortenson\Submittals\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations &amp; Gravity Beam Analysis</span>
+            <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
+        </div>
+
+        <!-- RFI Question Section (shown only for RFI items) -->
+        <div id="rfi-question-section" class="info-box" style="background: #fff8e1; border: 2px solid #ffc107; display: none;">
+            <div style="font-size: 15px; color: #f57c00; font-weight: bold; margin-bottom: 10px;">&#10067; RFI Question</div>
+            <div id="rfi-question-text" style="font-size: 14px; color: #333; line-height: 1.6; white-space: pre-wrap;">N/A</div>
+        </div>
+
+        <div id="success-message" class="success-box hidden"></div>
+
+        <form id="response-form">
+            <div class="form-group">
+                <label for="response_category">Response Category *</label>
+                <select name="response_category" id="response_category">
+                    <option value="">-- Select Response Category --</option>
+                    <option value="Approved">Approved</option>
+                    <option value="Approved as Noted">Approved as Noted</option>
+                    <option value="For Record Only">For Record Only</option>
+                    <option value="Rejected">Rejected</option>
+                    <option value="Revise and Resubmit">Revise and Resubmit</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <p class="section-title">Files to Include in Response</p>
+                <div class="file-section">
+                    <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+                        Select PDF files from the item folder to include with your response.
+                    </p>
+                    
+                    <div class="file-list" id="file-list">
+                        <p style="color: #888; padding: 8px; text-align: center;">Loading files...</p>
+                    </div>
+                    
+                    <button type="button" onclick="loadFolderFiles()" style="margin-top: 10px; padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;">Refresh File List</button>
+                    <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="notes">Description</label>
+                <textarea name="notes" id="notes" placeholder="Provide response description for the official record..."></textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="internal_notes">Internal Notes <span style="font-weight: normal; color: #888;">(not shared externally)</span></label>
+                <textarea name="internal_notes" id="internal_notes" placeholder="Add any internal notes for the QC Reviewer..."></textarea>
+            </div>
+            
+            <button type="button" class="btn" id="submit-btn" onclick="submitResponse()">Submit Response</button>
+        </form>
+    </div>
+
+    <script language="JavaScript">
+        var ITEM_CONFIG = {
+            item_id: 43,
+            item_type: "Submittal",
+            identifier: "Submittal #270",
+            title: "LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis",
+            token: "78nfbdCM11ce2HebPLJxGtRak1ViUVbNIDlt5_1q_nY",
+            reviewer_name: "Iyer, Padmanabhan",
+            reviewer_email: "Padmanabhan.Iyer@hdrinc.com",
+            folder_path: "\\\\sac-filsrv1\\Projects\\Structural-028\\Projects\\LEB\\9.0_Const_Svcs\\Mortenson\\Submittals\\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis",
+            is_rfi: false
+        };
+        
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var shell = new ActiveXObject("WScript.Shell");
+        
+        // Get folder path from the HTML element (avoids JS escaping issues)
+        function getFolderPath() {
+            return document.getElementById("folder-path").innerText;
+        }
+
+        // Initialize on load
+        window.onload = function() {
+            loadFolderFiles();
+            // Show RFI question section if this is an RFI
+            if (ITEM_CONFIG.is_rfi) {
+                var rfiSection = document.getElementById("rfi-question-section");
+                if (rfiSection) {
+                    rfiSection.style.display = "block";
+                }
+            }
+        };
+        
+        function openFolder() {
+            var folderPath = getFolderPath();
+            if (fso.FolderExists(folderPath)) {
+                shell.Run('explorer.exe "' + folderPath + '"', 1, false);
+            } else {
+                alert("Folder not found: " + folderPath);
+            }
+        }
+        
+        function loadFolderFiles() {
+            var folderPath = getFolderPath();
+            var fileListEl = document.getElementById("file-list");
+            
+            if (!fso.FolderExists(folderPath)) {
+                fileListEl.innerHTML = "<p style='color: #dc3545; padding: 8px;'>Folder not found</p>";
+                return;
+            }
+            
+            // Use DIR command to list PDFs - works better with special characters in paths
+            var exec = shell.Exec('cmd /c dir /b "' + folderPath + '\\*.pdf"');
+            var output = exec.StdOut.ReadAll();
+            var html = "";
+            var count = 0;
+            
+            if (output && output.length > 0) {
+                var fileNames = output.split("\r\n");
+                for (var i = 0; i < fileNames.length; i++) {
+                    var fileName = fileNames[i].replace(/^\s+|\s+$/g, ''); // trim
+                    if (fileName.length > 0) {
+                        html += "<div class='file-item'>" +
+                            "<input type='checkbox' name='selected_files' value='" + fileName.replace(/'/g, "&#39;") + "' id='file_" + count + "' checked>" +
+                            "<label for='file_" + count + "'>" + fileName + "</label>" +
+                            "</div>";
+                        count++;
+                    }
+                }
+            }
+            
+            if (count === 0) {
+                html = "<p style='color: #888; padding: 8px; text-align: center;'>No PDF files in folder</p>";
+            }
+            
+            fileListEl.innerHTML = html;
+        }
+
+        function submitResponse() {
+            var category = document.getElementById('response_category').value;
+            var notes = document.getElementById('notes').value;
+            var internalNotes = document.getElementById('internal_notes').value;
+            
+            if (!category) {
+                alert('Please select a response category.');
+                return;
+            }
+            
+            // Gather checked files
+            var checkedFiles = [];
+            var checkboxes = document.querySelectorAll('input[name="selected_files"]:checked');
+            for (var i = 0; i < checkboxes.length; i++) {
+                checkedFiles.push(checkboxes[i].value);
+            }
+            
+            // Build response object
+            var response = {
+                _form_type: "reviewer_response",
+                _version: "1.0",
+                _submitted_at: new Date().toISOString(),
+                item_id: ITEM_CONFIG.item_id,
+                identifier: ITEM_CONFIG.identifier,
+                token: ITEM_CONFIG.token,
+                reviewer_name: ITEM_CONFIG.reviewer_name,
+                reviewer_email: ITEM_CONFIG.reviewer_email,
+                response_category: category,
+                selected_files: checkedFiles,
+                notes: notes,
+                internal_notes: internalNotes
+            };
+            
+            var jsonString = JSON.stringify(response, null, 2);
+            
+            // Save to Responses folder (same folder as this HTA file)
+            // Get the folder from ITEM_CONFIG since document.location may not preserve UNC paths
+            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            var filePath = responsesFolder + "\\_reviewer_response.json";
+            
+            try {
+                // Ensure Responses folder exists
+                if (!fso.FolderExists(responsesFolder)) {
+                    fso.CreateFolder(responsesFolder);
+                }
+                
+                var file = fso.CreateTextFile(filePath, true, false);
+                file.Write(jsonString);
+                file.Close();
+                
+                // Success!
+                document.getElementById('response-form').className = 'hidden';
+                document.getElementById('success-message').innerHTML = 
+                    '<h3>Response Submitted Successfully!</h3>' +
+                    '<p style="margin-top: 10px;">Your response has been saved to the Responses folder.</p>' +
+                    '<p style="margin-top: 5px; font-size: 13px;">The tracker will automatically import it when it runs.</p>' +
+                    '<button class="open-folder-btn" onclick="openResponsesFolder()" style="margin-top: 15px;">View in Folder</button>';
+                document.getElementById('success-message').className = 'success-box';
+            } catch (e) {
+                alert("Error saving response: " + e.message + "\\nPath: " + filePath);
+            }
+        }
+        
+        function openResponsesFolder() {
+            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            shell.Run('explorer.exe "' + responsesFolder + '"', 1, false);
+        }
+    </script>
+</body>
+</html>
+
+
+
+
+

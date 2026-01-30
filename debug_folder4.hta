@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION ID="DebugApp" APPLICATIONNAME="Debug" SCROLL="yes" SINGLEINSTANCE="yes">
+<script language="VBScript">
+Sub Window_OnLoad()
+    Dim fso, folder, file, html, folderPath
+    
+    folderPath = "\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\Mortenson\Submittals\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis"
+    
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    html = "<b>Files count:</b> "
+    
+    If fso.FolderExists(folderPath) Then
+        Set folder = fso.GetFolder(folderPath)
+        html = html & folder.Files.Count & "<br><br>"
+        
+        For Each file In folder.Files
+            html = html & "- " & file.Name & "<br>"
+        Next
+    Else
+        html = html & "Folder not found"
+    End If
+    
+    document.getElementById("output").innerHTML = html
+End Sub
+</script>
+</head>
+<body style="font-family: Arial; padding: 20px;">
+<h2>Debug v4 - VBScript</h2>
+<div id="output">Loading...</div>
+</body>
+</html>

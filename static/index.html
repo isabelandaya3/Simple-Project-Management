@@ -199,7 +199,7 @@
 
             <!-- Items Table -->
             <div class="table-container" id="table-container">
-                <table class="items-table">
+                <table class="items-table" id="items-table">
                     <thead>
                         <tr>
                             <th>Type</th>
@@ -570,6 +570,14 @@
                     <button class="btn btn-success btn-full" id="btn-close-item">✅ Close Out Item</button>
                     <button class="btn btn-warning btn-full hidden" id="btn-reopen-item">🔄 Undo Closeout (Admin)</button>
                     <p id="closed-at-info" class="text-muted text-center hidden"></p>
+                </div>
+                
+                <!-- Previous Responses History (shown for reopened items) -->
+                <div class="drawer-section hidden" id="previous-responses-section">
+                    <label class="section-label">📜 Previous Response History</label>
+                    <div id="previous-responses-list">
+                        <!-- Previous responses will be loaded here -->
+                    </div>
                 </div>
                 
                 <!-- Delete Item (Admin) -->

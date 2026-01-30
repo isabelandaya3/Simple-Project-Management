@@ -1,0 +1,27 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION ID="TestApp" APPLICATIONNAME="Test" SCROLL="yes" SINGLEINSTANCE="yes">
+<script language="javascript">
+var fso = new ActiveXObject("Scripting.FileSystemObject");
+
+function testPath() {
+    var spanPath = document.getElementById("test-span").innerText;
+    var jsPath = "\\\\sac-filsrv1\\Projects\\Structural-028\\Projects\\LEB\\9.0_Const_Svcs\\Mortenson\\Submittals\\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis";
+    
+    document.getElementById("result").innerHTML = 
+        "<b>Span innerText:</b><br>" + spanPath + "<br><br>" +
+        "<b>JS String:</b><br>" + jsPath + "<br><br>" +
+        "<b>Span path exists:</b> " + fso.FolderExists(spanPath) + "<br>" +
+        "<b>JS path exists:</b> " + fso.FolderExists(jsPath);
+}
+
+window.onload = testPath;
+</script>
+</head>
+<body>
+<span id="test-span">\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\Mortenson\Submittals\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations &amp; Gravity Beam Analysis</span>
+<hr>
+<div id="result"></div>
+</body>
+</html>

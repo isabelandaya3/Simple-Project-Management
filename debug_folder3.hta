@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION ID="DebugApp" APPLICATIONNAME="Debug" SCROLL="yes" SINGLEINSTANCE="yes">
+<script language="JavaScript">
+function debugFolder() {
+    var output = document.getElementById("output");
+    var folderPath = "\\\\sac-filsrv1\\Projects\\Structural-028\\Projects\\LEB\\9.0_Const_Svcs\\Mortenson\\Submittals\\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis";
+    
+    var html = "";
+    
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var folder = fso.GetFolder(folderPath);
+        var filesCol = folder.Files;
+        html += "<b>Files collection count:</b> " + filesCol.Count + "<br><br>";
+        
+        var files = new Enumerator(filesCol);
+        var count = 0;
+        for (; !files.atEnd(); files.moveNext()) {
+            try {
+                var file = files.item();
+                try {
+                    var name = file.Name;
+                    var ext = fso.GetExtensionName(name).toLowerCase();
+                    html += count + ": [" + name + "] ext=" + ext + "<br>";
+                } catch(e3) {
+                    html += count + ": ERROR getting Name: " + e3.message + "<br>";
+                }
+            } catch(e2) {
+                html += count + ": ERROR getting item: " + e2.message + "<br>";
+            }
+            count++;
+        }
+        html += "<br><b>Loop completed, count:</b> " + count;
+    } catch(e) {
+        html += "<b style='color:red'>ERROR:</b> " + e.message + "<br>";
+    }
+    
+    output.innerHTML = html;
+}
+
+window.onload = debugFolder;
+</script>
+</head>
+<body style="font-family: Arial; padding: 20px;">
+<h2>Debug v3 - Error Catching</h2>
+<div id="output">Loading...</div>
+</body>
+</html>

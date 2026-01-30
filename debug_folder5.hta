@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION ID="DebugApp" APPLICATIONNAME="Debug" SCROLL="yes" SINGLEINSTANCE="yes">
+<script language="VBScript">
+Sub Window_OnLoad()
+    Dim shell, exec, output, folderPath, html
+    
+    folderPath = "\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\Mortenson\Submittals\Submittal - 270 - LEBADMIN_061543_Calc_Area AB_Admin CLT Roof Structural Calculations & Gravity Beam Analysis"
+    
+    Set shell = CreateObject("WScript.Shell")
+    
+    html = "<b>Using DIR command:</b><br><br>"
+    
+    Set exec = shell.Exec("cmd /c dir /b """ & folderPath & "\*.pdf""")
+    output = exec.StdOut.ReadAll()
+    
+    If Len(output) > 0 Then
+        html = html & Replace(output, vbCrLf, "<br>")
+    Else
+        html = html & "No files found or error"
+    End If
+    
+    document.getElementById("output").innerHTML = html
+End Sub
+</script>
+</head>
+<body style="font-family: Arial; padding: 20px;">
+<h2>Debug v5 - DIR Command</h2>
+<div id="output">Loading...</div>
+</body>
+</html>
