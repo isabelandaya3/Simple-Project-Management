@@ -124,13 +124,38 @@ QCR_REVIEW_DAYS = 2
 # WORKDAY HELPER FUNCTIONS
 # =============================================================================
 
+def parse_date_string(date_str):
+    """Safely parse a date string to a date object.
+    
+    Handles multiple formats:
+    - '2026-01-30' (date only)
+    - '2026-01-30T11:35:15' (ISO datetime)
+    - '2026-01-30 11:35:15' (datetime with space)
+    
+    Returns a date object, or None if parsing fails.
+    """
+    if not date_str:
+        return None
+    if hasattr(date_str, 'date'):
+        return date_str.date()
+    if isinstance(date_str, str):
+        # Strip time component if present
+        date_part = date_str.split('T')[0].split(' ')[0]
+        try:
+            return datetime.strptime(date_part, '%Y-%m-%d').date()
+        except:
+            return None
+    return None
+
 def format_date_for_email(date_str):
     """Format a date string for display in emails (e.g., 'Wed, 1/19/26')."""
     if not date_str:
         return 'N/A'
     try:
         if isinstance(date_str, str):
-            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            # Handle both date-only and datetime formats
+            date_part = date_str.split('T')[0].split(' ')[0]
+            date_obj = datetime.strptime(date_part, '%Y-%m-%d')
         else:
             date_obj = date_str
         # Format: Wed, 1/19/26 (abbreviated day name, no leading zeros)
@@ -323,9 +348,9 @@ def business_days_between(start_date, end_date):
     Inclusive of start_date, exclusive of end_date.
     """
     if isinstance(start_date, str):
-        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        start_date = parse_date_string(start_date)
     if isinstance(end_date, str):
-        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        end_date = parse_date_string(end_date)
     
     if hasattr(start_date, 'date'):
         start_date = start_date.date()
@@ -349,7 +374,7 @@ def subtract_business_days(end_date, n):
     If n=3 and end_date is Friday, result is Tuesday (skipping Sat/Sun).
     """
     if isinstance(end_date, str):
-        end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        end_date = parse_date_string(end_date)
     if hasattr(end_date, 'date'):
         end_date = end_date.date()
     
@@ -366,7 +391,7 @@ def add_business_days(start_date, n):
     Return the date that is n business days after start_date.
     """
     if isinstance(start_date, str):
-        start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+        start_date = parse_date_string(start_date)
     if hasattr(start_date, 'date'):
         start_date = start_date.date()
     
@@ -398,11 +423,12 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
             'required_days': None
         }
     
-    # Parse dates
+    # Parse dates (handle both date-only and datetime formats)
     if isinstance(date_received, str):
-        date_received = datetime.strptime(date_received, '%Y-%m-%d').date()
+        # Handle both '2026-01-30' and '2026-01-30T11:35:15' formats
+        date_received = datetime.fromisoformat(date_received.split('T')[0]).date()
     if isinstance(contractor_due_date, str):
-        contractor_due_date = datetime.strptime(contractor_due_date, '%Y-%m-%d').date()
+        contractor_due_date = datetime.fromisoformat(contractor_due_date.split('T')[0]).date()
     if hasattr(date_received, 'date'):
         date_received = date_received.date()
     if hasattr(contractor_due_date, 'date'):
@@ -445,9 +471,11 @@ def get_due_date_status(due_date):
         return None
     
     if isinstance(due_date, str):
-        due_date = datetime.strptime(due_date, '%Y-%m-%d').date()
+        due_date = parse_date_string(due_date)
     if hasattr(due_date, 'date'):
         due_date = due_date.date()
+    if not due_date:
+        return None
     
     today = datetime.now().date()
     days_remaining = business_days_between(today, due_date)
@@ -2468,11 +2496,64 @@ def parse_title(subject, identifier, body=None):
     return title if title else None
 
 def parse_due_date(body):
-    """Extract due date from email body."""
+    """Extract due date from email body.
+    
+    For update emails with "What's changed" section, extracts the NEW due date (after the arrow).
+    Otherwise, extracts from the "Item Details" section.
+    """
     if not body:
         return None
     
-    # Patterns to look for (ACC uses tab/whitespace separation, not just colons)
+    def try_parse_date(date_str):
+        """Helper to parse a date string into YYYY-MM-DD format."""
+        date_str = date_str.strip()
+        if HAS_DATEUTIL:
+            try:
+                parsed_date = date_parser.parse(date_str, fuzzy=True, ignoretz=True)
+                return parsed_date.strftime('%Y-%m-%d')
+            except:
+                pass
+        else:
+            for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%B %d, %Y', '%b %d, %Y', '%b %d %Y']:
+                try:
+                    parsed_date = datetime.strptime(date_str, fmt)
+                    return parsed_date.strftime('%Y-%m-%d')
+                except:
+                    pass
+        return None
+    
+    # FIRST: Check for "What's changed" section with arrow pattern
+    # This handles: "Due Date    Jan 30, 2026 → Feb 04, 2026" or "Unspecified → Feb 04, 2026"
+    # We want the NEW date (after the arrow)
+    arrow_patterns = [
+        # Any text (old date or "Unspecified") → new date
+        r"Due\s*Date[:\s\t]+[^\n→>-]*(?:→|->|➔|➜)\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
+        r"Due\s*Date[:\s\t]+[^\n→>-]*(?:→|->|➔|➜)\s*(\d{1,2}/\d{1,2}/\d{4})",
+    ]
+    
+    for pattern in arrow_patterns:
+        match = re.search(pattern, body, re.IGNORECASE)
+        if match:
+            new_date = try_parse_date(match.group(1))
+            if new_date:
+                return new_date
+    
+    # SECOND: Look for "Item Details" section specifically (more reliable)
+    # This section has the definitive current values
+    item_details_section = re.search(r'Item\s*Details(.+?)(?:Attachments|$)', body, re.IGNORECASE | re.DOTALL)
+    if item_details_section:
+        details_text = item_details_section.group(1)
+        for pattern in [
+            r'Due\s*Date[:\s\t]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})',
+            r'Due\s*Date[:\s\t]+(\d{1,2}/\d{1,2}/\d{4})',
+        ]:
+            match = re.search(pattern, details_text, re.IGNORECASE)
+            if match:
+                parsed = try_parse_date(match.group(1))
+                if parsed:
+                    return parsed
+    
+    # THIRD: Standard patterns (fallback for non-ACC emails or simple formats)
     patterns = [
         r'Due\s*Date[:\s\t]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})',  # "Due Date    Jan 22, 2026"
         r'Due\s*Date[:\s\t]+(\d{1,2}/\d{1,2}/\d{4})',  # "Due Date    01/22/2026"
@@ -2487,24 +2568,9 @@ def parse_due_date(body):
         match = re.search(pattern, body, re.IGNORECASE)
         if match:
             date_str = match.group(1).strip()
-            # Try to parse the date
-            if HAS_DATEUTIL:
-                try:
-                    # Parse without timezone awareness to avoid UTC conversion issues
-                    parsed_date = date_parser.parse(date_str, fuzzy=True, ignoretz=True)
-                    # Return just the date portion (no time conversion)
-                    return parsed_date.strftime('%Y-%m-%d')
-                except:
-                    pass
-            else:
-                # Basic date parsing without dateutil
-                # Try common formats
-                for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%B %d, %Y', '%b %d, %Y', '%b %d %Y']:
-                    try:
-                        parsed_date = datetime.strptime(date_str, fmt)
-                        return parsed_date.strftime('%Y-%m-%d')
-                    except:
-                        pass
+            parsed = try_parse_date(date_str)
+            if parsed:
+                return parsed
     return None
 
 def parse_priority(body):
@@ -3998,7 +4064,7 @@ def get_items_needing_reminders():
     
     for item in cursor.fetchall():
         item = dict(item)
-        due_date = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+        due_date = parse_date_string(item['initial_reviewer_due_date'])
         
         if due_date == today:
             reminder_stage = 'due_today'
@@ -4054,8 +4120,8 @@ def get_items_needing_reminders():
     
     for item in cursor.fetchall():
         item = dict(item)
-        due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
-        qcr_email_sent_date = datetime.strptime(item['qcr_email_sent_at'][:10], '%Y-%m-%d').date() if item['qcr_email_sent_at'] else None
+        due_date = parse_date_string(item['qcr_due_date'])
+        qcr_email_sent_date = parse_date_string(item['qcr_email_sent_at']) if item['qcr_email_sent_at'] else None
         
         if due_date == today:
             reminder_stage = 'due_today'
@@ -4099,7 +4165,7 @@ def get_items_needing_reminders():
     
     for item in cursor.fetchall():
         item = dict(item)
-        due_date = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+        due_date = parse_date_string(item['initial_reviewer_due_date'])
         
         if due_date == today:
             reminder_stage = 'due_today'
@@ -4150,8 +4216,8 @@ def get_items_needing_reminders():
     
     for item in cursor.fetchall():
         item = dict(item)
-        due_date = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
-        qcr_email_sent_date = datetime.strptime(item['qcr_email_sent_at'][:10], '%Y-%m-%d').date() if item['qcr_email_sent_at'] else None
+        due_date = parse_date_string(item['qcr_due_date'])
+        qcr_email_sent_date = parse_date_string(item['qcr_email_sent_at']) if item['qcr_email_sent_at'] else None
         
         if due_date == today:
             reminder_stage = 'due_today'
@@ -9236,31 +9302,40 @@ def api_delete_item(item_id):
 @app.route('/api/inbox', methods=['GET'])
 @login_required
 def api_get_inbox():
-    """Get items where user is initial reviewer, QCR, or assigned, sorted by relevant due date."""
+    """Get items where user is initial reviewer, QCR, assigned, or in item_reviewers table."""
     user_id = session['user_id']
     show_closed = request.args.get('show_closed', 'false').lower() == 'true'
     
     conn = get_db()
     cursor = conn.cursor()
     
-    # Get items where user is initial reviewer, QCR, or assigned to
+    # Get user's email to check item_reviewers table
+    cursor.execute('SELECT email FROM user WHERE id = ?', (user_id,))
+    user_row = cursor.fetchone()
+    user_email = user_row['email'] if user_row else ''
+    
+    # Get items where user is initial reviewer, QCR, assigned to, OR in item_reviewers table
     query = '''
-        SELECT i.*, 
+        SELECT DISTINCT i.*, 
                u.display_name as assigned_to_name,
                ir.display_name as initial_reviewer_name,
                qcr.display_name as qcr_name,
                CASE 
                    WHEN i.initial_reviewer_id = ? THEN 'initial_reviewer'
                    WHEN i.qcr_id = ? THEN 'qcr'
+                   WHEN EXISTS (SELECT 1 FROM item_reviewers r WHERE r.item_id = i.id 
+                                AND (r.user_id = ? OR LOWER(r.reviewer_email) = LOWER(?))) THEN 'reviewer'
                    ELSE 'assigned'
                END as user_role
         FROM item i
         LEFT JOIN user u ON i.assigned_to_user_id = u.id
         LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
         LEFT JOIN user qcr ON i.qcr_id = qcr.id
-        WHERE (i.initial_reviewer_id = ? OR i.qcr_id = ? OR i.assigned_to_user_id = ?)
+        WHERE (i.initial_reviewer_id = ? OR i.qcr_id = ? OR i.assigned_to_user_id = ?
+               OR EXISTS (SELECT 1 FROM item_reviewers r WHERE r.item_id = i.id 
+                          AND (r.user_id = ? OR LOWER(r.reviewer_email) = LOWER(?))))
     '''
-    params = [user_id, user_id, user_id, user_id, user_id]
+    params = [user_id, user_id, user_id, user_email, user_id, user_id, user_id, user_id, user_email]
     
     if not show_closed:
         query += " AND i.closed_at IS NULL"
