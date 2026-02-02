@@ -59,7 +59,7 @@ html = f'''<div style="font-family:Segoe UI,Arial;color:#333;font-size:14px;line
 
 <div style="margin:15px 0;padding:15px;background:#e0e7ff;border:2px solid #4f46e5;border-radius:8px;">
 <div style="font-size:14px;color:#3730a3;font-weight:bold;">📝 RFI Question:</div>
-<div style="margin-top:8px;font-size:13px;color:#312e81;white-space:pre-wrap;">{item['rfi_question'][:500] if item['rfi_question'] else 'See attached documents'}</div>
+<div style="margin-top:8px;font-size:13px;color:#312e81;white-space:pre-wrap;">{item['rfi_question'] if item['rfi_question'] else 'See attached documents'}</div>
 </div>
 
 <div style="margin-top:18px;">

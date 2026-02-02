@@ -1963,10 +1963,8 @@ tr.insufficient-warning:hover {
 .response-notes {
     color: var(--text-secondary);
     font-style: italic;
-    max-width: 200px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .response-time {

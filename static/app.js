@@ -402,7 +402,8 @@ function generateItemRow(item) {
     const typeClass = item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal';
     const priorityClass = item.priority ? `chip-${item.priority.toLowerCase()}` : '';
     const closedClass = item.closed_at ? 'closed-row' : '';
-    const insufficientClass = item.is_contractor_window_insufficient ? 'insufficient-warning' : '';
+    // Highlight orange if any reviewer due date is within 2 days
+    const urgentClass = item.review_due_soon ? 'insufficient-warning' : '';
     
     // Check if item has pending contractor update
     const hasPendingUpdate = item.has_pending_update === 1;
@@ -415,8 +416,8 @@ function generateItemRow(item) {
     const isUnread = state.user && !readBy.includes(state.user.id);
     const unreadDot = isUnread ? '<span class="unread-dot"></span>' : '';
     
-    // Warning icon for insufficient window
-    const warningIcon = item.is_contractor_window_insufficient ? '<span class="warning-icon-small" title="Insufficient contractor window">⚠️</span>' : '';
+    // Warning icon for urgent review (due within 2 days)
+    const warningIcon = item.review_due_soon ? '<span class="warning-icon-small" title="Review due within 2 days">⚠️</span>' : '';
     
     // Selection checkbox for select mode
     const isSelected = state.selectedItemIds.includes(item.id);
@@ -425,7 +426,7 @@ function generateItemRow(item) {
     const selectedClass = isSelected ? 'selected-row' : '';
     
     return `
-        <tr data-item-id="${item.id}" class="${closedClass} ${insufficientClass} ${selectedClass} ${pendingUpdateClass}">
+        <tr data-item-id="${item.id}" class="${closedClass} ${urgentClass} ${selectedClass} ${pendingUpdateClass}">
             ${selectCheckbox}
             <td>${unreadDot}${updateIcon}<span class="chip ${typeClass}">${escapeHtml(item.type)}</span></td>
             <td>${warningIcon}${escapeHtml(item.identifier)}</td>
@@ -613,7 +614,7 @@ function closeDetailDrawer() {
 /**
  * Populate detail drawer with item data
  */
-function populateDetailDrawer(item) {
+async function populateDetailDrawer(item) {
     document.getElementById('drawer-title').textContent = item.identifier;
     
     // Type chip
@@ -629,11 +630,11 @@ function populateDetailDrawer(item) {
     document.getElementById('detail-last-email').textContent = formatDateTime(item.last_email_at);
     document.getElementById('detail-subject').textContent = item.source_subject || 'Manual entry';
     
-    // Warning banner for insufficient window
+    // Warning banner for urgent review (due within 2 days)
     const warningBanner = document.getElementById('insufficient-window-warning');
     const warningText = document.getElementById('warning-text');
-    if (item.is_contractor_window_insufficient) {
-        warningText.textContent = `⚠️ Contractor provided insufficient review window`;
+    if (item.review_due_soon) {
+        warningText.textContent = `⚠️ Review due within 2 days - immediate attention required`;
         show(warningBanner);
     } else {
         hide(warningBanner);
@@ -661,8 +662,7 @@ function populateDetailDrawer(item) {
         rfiQuestionSection.classList.add('hidden');
     }
     
-    // Reviewer fields
-    document.getElementById('detail-initial-reviewer').value = item.initial_reviewer_id || '';
+    // Reviewer fields (hidden select deprecated - using chip selection)
     document.getElementById('detail-qcr').value = item.qcr_id || '';
     
     // Calculated due dates - now editable inputs with color coding
@@ -728,15 +728,16 @@ function populateDetailDrawer(item) {
         hide(closedInfo);
     }
     
-    // Update workflow status in drawer
-    updateDrawerWorkflowStatus(item);
+    // Load reviewers using the new chip-based system (must await before checking button state)
+    await loadReviewerChips(item);
     
-    // Load reviewers using the new chip-based system
-    loadReviewerChips(item);
-    
-    // Initialize QCR autocomplete and set value
+    // Initialize QCR autocomplete and set value BEFORE updating workflow status
+    // (updateDrawerWorkflowStatus calls updateSendButtonState which needs selectedQcrUser)
     initQcrAutocomplete();
     setQcrFromItem(item);
+    
+    // Update workflow status in drawer (must be after setQcrFromItem)
+    updateDrawerWorkflowStatus(item);
     
     // Show previous responses history for reopened items
     renderPreviousResponses(item);
@@ -818,14 +819,20 @@ function renderPreviousResponses(item) {
 }
 
 /**
- * Validate reviewer selections (Initial Reviewer cannot be the same as QCR)
+ * Validate reviewer selections (Reviewers cannot include the QCR)
  */
 function validateReviewers() {
-    const initialReviewerId = document.getElementById('detail-initial-reviewer').value;
-    const qcrId = document.getElementById('detail-qcr').value;
     const errorEl = document.getElementById('reviewer-error');
+    if (!errorEl) return true;
     
-    if (initialReviewerId && qcrId && initialReviewerId === qcrId) {
+    // Get QCR email from selectedQcrUser or hidden field
+    const qcrEmail = selectedQcrUser ? selectedQcrUser.email.toLowerCase() : '';
+    
+    // Check if any selected reviewer has same email as QCR
+    const hasConflict = qcrEmail && selectedReviewerChips && 
+        selectedReviewerChips.some(r => r.email.toLowerCase() === qcrEmail);
+    
+    if (hasConflict) {
         errorEl.style.display = 'block';
         return false;
     } else {
@@ -854,7 +861,6 @@ async function saveItem() {
         due_date: document.getElementById('detail-due-date').value || null,
         priority: document.getElementById('detail-priority').value || null,
         status: document.getElementById('detail-status').value,
-        initial_reviewer_id: document.getElementById('detail-initial-reviewer').value || null,
         qcr_id: qcrId || null,
         initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
         qcr_due_date: document.getElementById('detail-qcr-due').value || null,
@@ -1128,7 +1134,7 @@ function renderWorkflow() {
             } catch (e) {
                 if (item.reviewer_selected_files) filesCount = '✓ Files selected';
             }
-            const notes = item.reviewer_notes ? `<div class="response-notes" title="${escapeHtml(item.reviewer_notes)}">${escapeHtml(item.reviewer_notes.substring(0, 50))}${item.reviewer_notes.length > 50 ? '...' : ''}</div>` : '';
+            const notes = item.reviewer_notes ? `<div class="response-notes" title="${escapeHtml(item.reviewer_notes)}">${escapeHtml(item.reviewer_notes)}</div>` : '';
             const statusBadge = getReviewerStatusBadge(reviewerStatus);
             reviewerResponseHtml = `
                 <div class="response-details">
@@ -1153,7 +1159,7 @@ function renderWorkflow() {
             const actionColor = item.qcr_action === 'Approve' ? '#059669' : 
                                item.qcr_action === 'Modify' ? '#2563eb' : '#dc2626';
             const modeText = item.qcr_response_mode ? ` (${item.qcr_response_mode})` : '';
-            const qcrNotes = item.qcr_notes ? `<div class="response-notes" title="${escapeHtml(item.qcr_notes)}">${escapeHtml(item.qcr_notes.substring(0, 40))}${item.qcr_notes.length > 40 ? '...' : ''}</div>` : '';
+            const qcrNotes = item.qcr_notes ? `<div class="response-notes" title="${escapeHtml(item.qcr_notes)}">${escapeHtml(item.qcr_notes)}</div>` : '';
             qcDecisionHtml = `
                 <div class="response-details">
                     <div class="qc-action-badge" style="color: ${actionColor}; font-weight: 600;">${actionIcon} ${escapeHtml(item.qcr_action)}</div>
@@ -1903,9 +1909,18 @@ function updateSendButtonState() {
     // Check if we have reviewers using the chip system
     const hasReviewers = selectedReviewerChips && selectedReviewerChips.length > 0;
     
-    // Check if QCR is selected
+    // Check if QCR is selected - check both the hidden select AND selectedQcrUser
     const qcrId = document.getElementById('detail-qcr').value;
-    const hasQcr = qcrId && qcrId !== '';
+    const hasQcr = (qcrId && qcrId !== '') || (selectedQcrUser && selectedQcrUser.id);
+    
+    // Debug logging
+    console.log('updateSendButtonState:', { 
+        hasReviewers, 
+        reviewerCount: selectedReviewerChips?.length,
+        qcrId, 
+        hasQcr,
+        selectedQcrUser 
+    });
     
     // Check for same reviewer (QCR shouldn't be in reviewer chips)
     const qcrEmail = selectedQcrUser ? selectedQcrUser.email.toLowerCase() : '';
@@ -2678,6 +2693,22 @@ async function openSettingsModal() {
         document.getElementById('setting-base-folder').value = config.base_folder_path || '';
         document.getElementById('setting-outlook-folder').value = config.outlook_folder || '';
         document.getElementById('setting-poll-interval').value = config.poll_interval_minutes || 5;
+        
+        // Load due date settings
+        const dueDateSettings = config.due_date_settings || {};
+        const submittal = dueDateSettings.submittal || {};
+        const rfi = dueDateSettings.rfi || {};
+        
+        document.getElementById('setting-submittal-low').value = submittal.Low || 20;
+        document.getElementById('setting-submittal-medium').value = submittal.Medium || 10;
+        document.getElementById('setting-submittal-high').value = submittal.High || 5;
+        
+        document.getElementById('setting-rfi-low').value = rfi.Low || 15;
+        document.getElementById('setting-rfi-medium').value = rfi.Medium || 7;
+        document.getElementById('setting-rfi-high').value = rfi.High || 3;
+        
+        document.getElementById('setting-qcr-review-days').value = dueDateSettings.qcr_review_days || 2;
+        
         show('settings-modal');
     } catch (e) {
         alert('Failed to load settings: ' + e.message);
@@ -2695,10 +2726,24 @@ async function handleSaveSettings(e) {
         project_name: document.getElementById('setting-project-name').value,
         base_folder_path: document.getElementById('setting-base-folder').value,
         outlook_folder: document.getElementById('setting-outlook-folder').value,
-        poll_interval_minutes: parseInt(document.getElementById('setting-poll-interval').value) || 5
+        poll_interval_minutes: parseInt(document.getElementById('setting-poll-interval').value) || 5,
+        due_date_settings: {
+            submittal: {
+                Low: parseInt(document.getElementById('setting-submittal-low').value) || 20,
+                Medium: parseInt(document.getElementById('setting-submittal-medium').value) || 10,
+                High: parseInt(document.getElementById('setting-submittal-high').value) || 5
+            },
+            rfi: {
+                Low: parseInt(document.getElementById('setting-rfi-low').value) || 15,
+                Medium: parseInt(document.getElementById('setting-rfi-medium').value) || 7,
+                High: parseInt(document.getElementById('setting-rfi-high').value) || 3
+            },
+            qcr_review_days: parseInt(document.getElementById('setting-qcr-review-days').value) || 2
+        }
     };
     
     try {
+        // Save general config
         await api('/config', {
             method: 'POST',
             body: JSON.stringify(data)
@@ -2958,6 +3003,7 @@ async function loadReviewerChips(item) {
     // Load all users for dropdown
     try {
         allUsersForChips = await api('/users');
+        console.log('Loaded users for chips:', allUsersForChips.length, 'users');
     } catch (e) {
         console.error('Failed to load users for chips:', e);
         allUsersForChips = [];
@@ -3312,13 +3358,27 @@ function filterQcrDropdown(searchText) {
             const isReviewer = selectedReviewerEmails.includes(user.email.toLowerCase());
             return `
                 <div class="dropdown-item ${isSelected ? 'selected' : ''} ${isReviewer ? 'reviewer-warning' : ''}" 
-                     onclick="selectQcr(${user.id}, '${escapeHtml(user.display_name)}', '${escapeHtml(user.email)}')"
+                     data-user-id="${user.id}"
+                     data-user-name="${escapeHtml(user.display_name)}"
+                     data-user-email="${escapeHtml(user.email)}"
                      ${isReviewer ? 'title="This user is already a reviewer"' : ''}>
                     <span class="dropdown-name">${escapeHtml(user.display_name)}${isReviewer ? ' ⚠️' : ''}</span>
                     <span class="dropdown-email">${escapeHtml(user.email)}</span>
                 </div>
             `;
         }).join('');
+        
+        // Add click handlers using event delegation
+        dropdown.querySelectorAll('.dropdown-item').forEach(item => {
+            item.addEventListener('click', function(e) {
+                e.stopPropagation();  // Prevent document click from closing dropdown before selection
+                const userId = parseInt(this.dataset.userId);
+                const userName = this.dataset.userName;
+                const userEmail = this.dataset.userEmail;
+                console.log('QCR clicked:', { userId, userName, userEmail });
+                selectQcr(userId, userName, userEmail);
+            });
+        });
     }
     
     dropdown.classList.add('show');
@@ -3328,6 +3388,8 @@ function filterQcrDropdown(searchText) {
  * Select a QCR user
  */
 function selectQcr(userId, name, email) {
+    console.log('selectQcr called:', { userId, name, email });
+    
     const searchInput = document.getElementById('qcr-search-input');
     const dropdown = document.getElementById('qcr-dropdown');
     const hiddenSelect = document.getElementById('detail-qcr');
@@ -3335,6 +3397,7 @@ function selectQcr(userId, name, email) {
     // Update hidden select value
     if (hiddenSelect) {
         hiddenSelect.value = userId;
+        console.log('Hidden select updated to:', hiddenSelect.value);
     }
     
     // Update search input display
@@ -3345,6 +3408,7 @@ function selectQcr(userId, name, email) {
     
     // Store selected user
     selectedQcrUser = { id: userId, name: name, email: email };
+    console.log('selectedQcrUser set to:', selectedQcrUser);
     
     // Hide dropdown
     if (dropdown) {
@@ -3433,9 +3497,9 @@ function renderContractorUpdatePanel(item) {
         changesHtml += `
             <div class="update-change-item">
                 <span class="label">Title:</span>
-                <span class="old-value">${escapeHtml(item.previous_title?.substring(0, 50))}...</span>
+                <span class="old-value">${escapeHtml(item.previous_title || '')}</span>
                 <span class="arrow">→</span>
-                <span class="new-value">${escapeHtml(item.title?.substring(0, 50))}...</span>
+                <span class="new-value">${escapeHtml(item.title || '')}</span>
             </div>
         `;
     }

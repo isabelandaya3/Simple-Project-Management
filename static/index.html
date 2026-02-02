@@ -451,10 +451,6 @@
                     <div class="reviewer-section">
                         <div class="form-group">
                             <label>Initial Reviewer(s)</label>
-                            <!-- Hidden select for backward compatibility -->
-                            <select id="detail-initial-reviewer" style="display:none;">
-                                <option value="">Not Assigned</option>
-                            </select>
                             <div class="reviewer-chips-container" id="reviewer-chips-container">
                                 <div class="reviewer-chips-area" id="reviewer-chips-area">
                                     <!-- Selected reviewer chips will appear here -->
@@ -723,13 +719,14 @@
 
     <!-- Settings Modal -->
     <div class="modal-overlay hidden" id="settings-modal">
-        <div class="modal">
+        <div class="modal modal-lg">
             <div class="modal-header">
                 <h2>Settings</h2>
                 <button class="btn-close" id="btn-close-settings">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="settings-form">
+                    <h3 style="margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">General Settings</h3>
                     <div class="form-group">
                         <label for="setting-project-name">Project Name</label>
                         <input type="text" id="setting-project-name">
@@ -747,7 +744,55 @@
                         <label for="setting-poll-interval">Poll Interval (minutes)</label>
                         <input type="number" id="setting-poll-interval" min="1" max="60">
                     </div>
-                    <button type="submit" class="btn btn-primary btn-full">Save Settings</button>
+                    
+                    <h3 style="margin-top: 25px; margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Due Date Settings</h3>
+                    <p style="color: #666; font-size: 0.9em; margin-bottom: 15px;">
+                        Set the number of <strong>business days</strong> required for reviewer response based on priority level.
+                    </p>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px;">
+                            <h4 style="margin: 0 0 10px 0; color: #0d6efd;">📦 Submittal Due Dates</h4>
+                            <div class="form-group">
+                                <label for="setting-submittal-low">Low Priority (days)</label>
+                                <input type="number" id="setting-submittal-low" min="1" max="60" value="20">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-submittal-medium">Medium Priority (days)</label>
+                                <input type="number" id="setting-submittal-medium" min="1" max="60" value="10">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-submittal-high">High Priority (days)</label>
+                                <input type="number" id="setting-submittal-high" min="1" max="60" value="5">
+                            </div>
+                        </div>
+                        
+                        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px;">
+                            <h4 style="margin: 0 0 10px 0; color: #198754;">📋 RFI Due Dates</h4>
+                            <div class="form-group">
+                                <label for="setting-rfi-low">Low Priority (days)</label>
+                                <input type="number" id="setting-rfi-low" min="1" max="60" value="15">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-rfi-medium">Medium Priority (days)</label>
+                                <input type="number" id="setting-rfi-medium" min="1" max="60" value="7">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-rfi-high">High Priority (days)</label>
+                                <input type="number" id="setting-rfi-high" min="1" max="60" value="3">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 15px;">
+                        <div class="form-group">
+                            <label for="setting-qcr-review-days">QCR Review Days</label>
+                            <input type="number" id="setting-qcr-review-days" min="1" max="10" value="2">
+                            <small class="form-hint">Business days for QCR review (QCR due date is always 1 day before contractor due date)</small>
+                        </div>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary btn-full" style="margin-top: 20px;">Save Settings</button>
                 </form>
             </div>
         </div>

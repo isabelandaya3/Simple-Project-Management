@@ -80,8 +80,23 @@ DEFAULT_CONFIG = {
     "outlook_folder": "Inbox",  # Can be "Inbox" or a subfolder like "LEB ACC"
     "poll_interval_minutes": 5,
     "server_port": 5000,
-    "project_name": "LEB – Local Tracker",
-    "rfi_tracker_excel_path": r"\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\LEB RFI Bulletin Tracker.xlsx"
+    "project_name": "LEB - Local Tracker",
+    "rfi_tracker_excel_path": r"\\sac-filsrv1\Projects\Structural-028\Projects\LEB\9.0_Const_Svcs\LEB RFI Bulletin Tracker.xlsx",
+    # Due date settings (business days required from date_received)
+    "due_date_settings": {
+        "submittal": {
+            "High": 5,
+            "Medium": 10,
+            "Low": 20
+        },
+        "rfi": {
+            "High": 3,
+            "Medium": 7,
+            "Low": 15
+        },
+        "qcr_days_before_due": 1,
+        "qcr_review_days": 2
+    }
 }
 
 def load_config():
@@ -106,12 +121,35 @@ CONFIG = load_config()
 # REVIEW DUE DATE CONFIGURATION
 # =============================================================================
 
-# Priority-based minimum work days required from date_received to contractor due_date
+def get_priority_min_days(item_type, priority):
+    """Get the minimum business days required based on item type and priority."""
+    settings = CONFIG.get('due_date_settings', {})
+    
+    if item_type == 'RFI':
+        type_settings = settings.get('rfi', {'High': 3, 'Medium': 7, 'Low': 15})
+    else:  # Submittal or default
+        type_settings = settings.get('submittal', {'High': 5, 'Medium': 10, 'Low': 20})
+    
+    # Map priority to days, default to Medium if not found
+    if priority in type_settings:
+        return type_settings[priority]
+    return type_settings.get('Medium', 10)
+
+def get_qcr_days_before_due():
+    """Get QCR days before contractor due date - always 1 business day."""
+    return 1
+
+def get_qcr_review_days():
+    """Get QCR review days from config."""
+    settings = CONFIG.get('due_date_settings', {})
+    return settings.get('qcr_review_days', 2)
+
+# Legacy constants for backward compatibility
 PRIORITY_MIN_DAYS = {
     'High': 5,
     'Medium': 10,
-    'Low': 15,
-    None: 10  # Default to Medium if no priority set
+    'Low': 20,
+    None: 10
 }
 
 # QCR requires at least this many work days before contractor due date
@@ -403,9 +441,15 @@ def add_business_days(start_date, n):
             days_added += 1
     return current
 
-def calculate_review_due_dates(date_received, contractor_due_date, priority):
+def calculate_review_due_dates(date_received, contractor_due_date, priority, item_type='Submittal'):
     """
     Calculate internal due dates for Initial Reviewer and QCR.
+    
+    Args:
+        date_received: When the item was received
+        contractor_due_date: The contractor's due date
+        priority: 'High', 'Medium', or 'Low'
+        item_type: 'Submittal' or 'RFI' - affects required days
     
     Returns dict with:
         - initial_reviewer_due_date
@@ -434,8 +478,8 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     if hasattr(contractor_due_date, 'date'):
         contractor_due_date = contractor_due_date.date()
     
-    # Get required minimum days based on priority
-    required_days = PRIORITY_MIN_DAYS.get(priority, PRIORITY_MIN_DAYS[None])
+    # Get required minimum days based on item type and priority
+    required_days = get_priority_min_days(item_type, priority)
     
     # Calculate contractor window (business days available)
     contractor_window_days = business_days_between(date_received, contractor_due_date)
@@ -443,12 +487,16 @@ def calculate_review_due_dates(date_received, contractor_due_date, priority):
     # Check if window is insufficient
     is_insufficient = contractor_window_days < required_days
     
+    # Get QCR settings from config
+    qcr_days_before = get_qcr_days_before_due()
+    qcr_review_days = get_qcr_review_days()
+    
     # Calculate QCR due date (1 business day before contractor due date)
-    qcr_due_date = subtract_business_days(contractor_due_date, QCR_DAYS_BEFORE_DUE)
+    qcr_due_date = subtract_business_days(contractor_due_date, qcr_days_before)
     
     # Calculate Initial Reviewer due date
-    # QCR needs QCR_REVIEW_DAYS (2) business days to review, so reviewer must submit 2 days before QCR due
-    initial_reviewer_due_date = subtract_business_days(qcr_due_date, QCR_REVIEW_DAYS)
+    # QCR needs qcr_review_days to review, so reviewer must submit that many days before QCR due
+    initial_reviewer_due_date = subtract_business_days(qcr_due_date, qcr_review_days)
     
     # Ensure reviewer due date is not before date_received
     if initial_reviewer_due_date < date_received:
@@ -2070,15 +2118,15 @@ def init_db():
     # Recalculate review due dates for ALL items that have date_received and due_date
     # This ensures the calculation is always correct with the latest logic
     cursor.execute('''
-        SELECT id, date_received, due_date, priority 
+        SELECT id, date_received, due_date, priority, type 
         FROM item 
         WHERE date_received IS NOT NULL 
         AND due_date IS NOT NULL
     ''')
     items_to_update = cursor.fetchall()
-    for item_id, date_received, due_date, priority in items_to_update:
+    for item_id, date_received, due_date, priority, item_type in items_to_update:
         try:
-            due_dates = calculate_review_due_dates(date_received, due_date, priority)
+            due_dates = calculate_review_due_dates(date_received, due_date, priority, item_type or 'Submittal')
             cursor.execute('''
                 UPDATE item SET 
                     initial_reviewer_due_date = ?,
@@ -2838,6 +2886,17 @@ def generate_reviewer_form_html(item_id):
     # Convert to dict for .get() access
     item = dict(item_row)
     
+    # Check for reviewer names in item_reviewers table if reviewer_name is not set
+    if not item.get('reviewer_name'):
+        cursor.execute('''
+            SELECT GROUP_CONCAT(reviewer_name, ', ') as reviewer_names
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        result = cursor.fetchone()
+        if result and result['reviewer_names']:
+            item['reviewer_name'] = result['reviewer_names']
+    
     if not item['folder_link']:
         conn.close()
         return {'success': False, 'error': 'Item has no folder assigned'}
@@ -2958,6 +3017,17 @@ def generate_qcr_form_html(item_id):
     
     # Convert to dict for easier handling (supports .get() method)
     item = dict(item)
+    
+    # Check for reviewer names in item_reviewers table if reviewer_name is not set
+    if not item.get('reviewer_name'):
+        cursor.execute('''
+            SELECT GROUP_CONCAT(reviewer_name, ', ') as reviewer_names
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        result = cursor.fetchone()
+        if result and result['reviewer_names']:
+            item['reviewer_name'] = result['reviewer_names']
     
     if not item['folder_link']:
         conn.close()
@@ -3238,7 +3308,8 @@ def process_qcr_response_json(json_path):
                     qcr_internal_notes = ?,
                     qcr_response_at = ?,
                     qcr_response_status = 'Waiting for Revision',
-                    reviewer_response_status = 'Revision Requested'
+                    reviewer_response_status = 'Revision Requested',
+                    status = 'In Review'
                 WHERE id = ?
             ''', (
                 data.get('qcr_notes'),
@@ -4342,6 +4413,12 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Project Folder</td><td style="border:1px solid #ddd;">{folder_link_html}</td></tr>
     </table>
 
+    {f'''<!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📝 RFI Question:</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>''' if (item.get('type') or '').upper() == 'RFI' and item.get('rfi_question') else ''}
+
     <p style="margin-top:20px; font-size:12px; color:#777;">
         <em>This is an automated reminder. Please submit your response as soon as possible.</em>
     </p>
@@ -4561,6 +4638,12 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
         <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{contractor_due_date}</td></tr>
     </table>
+
+    {f'''<!-- RFI QUESTION -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📝 RFI Question:</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81; white-space:pre-wrap;">{item.get('rfi_question', '')}</div>
+    </div>''' if (item.get('type') or '').upper() == 'RFI' and item.get('rfi_question') else ''}
 
     <p style="margin-top:20px; font-size:12px; color:#777;">
         <em>This is an automated reminder. Please submit your response as soon as possible.</em>
@@ -5008,7 +5091,9 @@ class EmailPoller:
                     cursor.execute('''
                         SELECT id, due_date, priority, title, status, closed_at,
                                reviewer_response_status, qcr_response_status,
-                               initial_reviewer_id, qcr_id, folder_link
+                               initial_reviewer_id, qcr_id, folder_link,
+                               final_response_category, final_response_text, final_response_files,
+                               qcr_response_category, qcr_response_text
                         FROM item 
                         WHERE identifier = ? AND bucket = ?
                     ''', (identifier, bucket))
@@ -5024,15 +5109,165 @@ class EmailPoller:
                         current_status = existing['status']
                         was_closed = existing['closed_at'] is not None
                         
-                        # Detect what changed
-                        due_date_changed = due_date and existing_due and due_date != existing_due
-                        priority_changed = priority and existing_priority and priority != existing_priority
-                        title_changed = title and existing_title and title.strip() != existing_title.strip()
+                        # Check if this is an internal activity notification (NOT a contractor update)
+                        # These emails come from ACC when:
+                        # - Another discipline adds/edits their review
+                        # - Item is forwarded, assigned, etc.
+                        # Subject patterns: "A review response was edited for...", "A review response was added for...",
+                        #                   "was forwarded", "was assigned", etc.
+                        is_internal_activity_email = bool(re.search(
+                            r'review response was (edited|added|created|updated)|'
+                            r'was forwarded|was assigned|workflow step|status changed|'
+                            r'comment was added|comment was edited|'
+                            r'you were mentioned|attachment was added',
+                            subject,
+                            re.IGNORECASE
+                        ))
+                        
+                        # Detect what changed - but only if NOT an internal activity email
+                        if is_internal_activity_email:
+                            # This is internal activity (reviewers adding responses, etc.) - NOT a contractor update
+                            # Don't trigger content change detection
+                            due_date_changed = False
+                            priority_changed = False
+                            title_changed = False
+                            print(f"  [Internal Activity] {identifier} - internal notification, skipping content change detection")
+                        else:
+                            due_date_changed = due_date and existing_due and due_date != existing_due
+                            priority_changed = priority and existing_priority and priority != existing_priority
+                            title_changed = title and existing_title and title.strip() != existing_title.strip()
+                        
+                        # Check if this is a revision of a closed item - create NEW item instead of reopening
+                        # Look for revision indicators in the new title like (Rev 1), (Rev 2), Rev 1, etc.
+                        is_revision_of_closed = False
+                        revision_number = None
+                        if was_closed and title_changed and title:
+                            rev_match = re.search(r'\(?\s*Rev\s*(\d+)\s*\)?', title, re.IGNORECASE)
+                            if rev_match:
+                                revision_number = rev_match.group(1)
+                                is_revision_of_closed = True
+                        
+                        if is_revision_of_closed:
+                            # CREATE NEW ITEM for the revision instead of reopening
+                            # Modify identifier to include revision suffix
+                            new_identifier = f"{identifier} Rev {revision_number}"
+                            
+                            # Check if this revision item already exists
+                            cursor.execute('''
+                                SELECT id FROM item WHERE identifier = ? AND bucket = ?
+                            ''', (new_identifier, bucket))
+                            existing_revision = cursor.fetchone()
+                            
+                            if not existing_revision:
+                                # Create new folder for the revision
+                                folder_link = create_item_folder(item_type, new_identifier, bucket, title)
+                                
+                                # Extract date_received from email received time
+                                if received_at:
+                                    date_received = received_at[:10]
+                                else:
+                                    date_received = datetime.now().strftime('%Y-%m-%d')
+                                
+                                # Calculate review due dates
+                                initial_reviewer_due = None
+                                qcr_due = None
+                                is_insufficient = 0
+                                
+                                if due_date and date_received:
+                                    due_dates = calculate_review_due_dates(date_received, due_date, priority, item_type)
+                                    initial_reviewer_due = due_dates['initial_reviewer_due_date']
+                                    qcr_due = due_dates['qcr_due_date']
+                                    is_insufficient = 1 if due_dates['is_contractor_window_insufficient'] else 0
+                                
+                                # Copy key info from parent item (reviewers, QCR) if available
+                                parent_initial_reviewer_id = existing['initial_reviewer_id']
+                                parent_qcr_id = existing['qcr_id']
+                                
+                                cursor.execute('''
+                                    INSERT INTO item (type, bucket, identifier, title, source_subject, 
+                                                    created_at, last_email_at, due_date, priority, folder_link,
+                                                    date_received, initial_reviewer_due_date, qcr_due_date, 
+                                                    is_contractor_window_insufficient, email_entry_id, rfi_question,
+                                                    initial_reviewer_id, qcr_id)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (item_type, bucket, new_identifier, title, subject,
+                                      received_at, received_at, due_date, priority, folder_link,
+                                      date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id, rfi_question,
+                                      parent_initial_reviewer_id, parent_qcr_id))
+                                new_item_id = cursor.lastrowid
+                                
+                                # Copy reviewers from parent item if it was multi-reviewer
+                                cursor.execute('''
+                                    SELECT reviewer_name, reviewer_email, user_id
+                                    FROM item_reviewers WHERE item_id = ?
+                                ''', (item_id,))
+                                parent_reviewers = cursor.fetchall()
+                                
+                                if parent_reviewers:
+                                    for pr in parent_reviewers:
+                                        new_token = generate_token()
+                                        cursor.execute('''
+                                            INSERT INTO item_reviewers (item_id, user_id, reviewer_name, reviewer_email, email_token, needs_response)
+                                            VALUES (?, ?, ?, ?, ?, 1)
+                                        ''', (new_item_id, pr['user_id'], pr['reviewer_name'], pr['reviewer_email'], new_token))
+                                    
+                                    # Enable multi-reviewer mode
+                                    cursor.execute('UPDATE item SET multi_reviewer_mode = 1 WHERE id = ?', (new_item_id,))
+                                
+                                # Create notification for new revision item
+                                create_notification(
+                                    'new_item',
+                                    f'📋 New Revision: {new_identifier}',
+                                    f'Contractor submitted {new_identifier} (revision of {identifier}). Reviewers copied from original item.',
+                                    item_id=new_item_id
+                                )
+                                
+                                print(f"  [Revision] Created NEW item {new_identifier} from closed {identifier}")
+                                
+                                # Log email for new item
+                                cursor.execute('''
+                                    INSERT INTO email_log (item_id, message_id, entry_id, subject, body_preview, 
+                                                          received_at, raw_type, processed)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                                ''', (new_item_id, message_id, message_id, subject, body[:500], 
+                                      received_at, item_type))
+                                
+                                # Commit before sending emails so the item exists
+                                conn.commit()
+                                
+                                # Get previous response from parent item for inclusion in emails
+                                parent_response = {
+                                    'category': existing['final_response_category'] or existing['qcr_response_category'],
+                                    'text': existing['final_response_text'] or existing['qcr_response_text'],
+                                    'files': existing.get('final_response_files'),
+                                    'parent_identifier': identifier
+                                }
+                                
+                                # Send revision notification emails to reviewers (like workflow restart)
+                                try:
+                                    email_result = send_revision_item_emails(
+                                        new_item_id, 
+                                        parent_response,
+                                        f"Contractor submitted Rev {revision_number}"
+                                    )
+                                    if email_result.get('success'):
+                                        print(f"  [Revision] Sent emails to {email_result.get('emails_sent', 0)} reviewer(s)")
+                                    else:
+                                        print(f"  [Revision] Email sending failed: {email_result.get('error')}")
+                                except Exception as email_err:
+                                    print(f"  [Revision] Error sending emails: {email_err}")
+                                
+                                processed_count += 1
+                                continue  # Skip the rest of the existing item logic
+                            else:
+                                # Revision item already exists, treat as normal update
+                                item_id = existing_revision['id']
+                                print(f"  [Revision] Item {new_identifier} already exists, updating")
                         
                         # Check if this is a meaningful update (item is in workflow or was closed)
                         in_active_workflow = current_status in ('Assigned', 'In Review', 'In QC', 'Ready for Response')
                         
-                        if (due_date_changed or priority_changed or title_changed) and (in_active_workflow or was_closed):
+                        if (due_date_changed or priority_changed or title_changed) and (in_active_workflow or was_closed) and not is_revision_of_closed:
                             # This is a contractor update that needs admin attention
                             update_type = 'due_date_only' if (due_date_changed and not title_changed and not priority_changed) else 'content_change'
                             
@@ -5145,7 +5380,7 @@ class EmailPoller:
                         is_insufficient = 0
                         
                         if due_date and date_received:
-                            due_dates = calculate_review_due_dates(date_received, due_date, priority)
+                            due_dates = calculate_review_due_dates(date_received, due_date, priority, item_type)
                             initial_reviewer_due = due_dates['initial_reviewer_due_date']
                             qcr_due = due_dates['qcr_due_date']
                             is_insufficient = 1 if due_dates['is_contractor_window_insufficient'] else 0
@@ -5253,6 +5488,14 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
     # Convert to dict for easier handling (supports .get() method)
     item = dict(item)
     
+    # Fallback to item_reviewers table if reviewer_email not set from user table
+    if not item['reviewer_email']:
+        cursor.execute('SELECT reviewer_email, reviewer_name FROM item_reviewers WHERE item_id = ?', (item_id,))
+        reviewer_row = cursor.fetchone()
+        if reviewer_row:
+            item['reviewer_email'] = reviewer_row['reviewer_email']
+            item['reviewer_name'] = reviewer_row['reviewer_name']
+    
     if not item['reviewer_email']:
         conn.close()
         return {'success': False, 'error': 'No Initial Reviewer assigned'}
@@ -5265,7 +5508,8 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         calculated = calculate_review_due_dates(
             item['date_received'],
             item['due_date'],
-            item['priority']
+            item['priority'],
+            item['type'] or 'Submittal'
         )
         # Use calculated values if database values are missing
         if not reviewer_due_date:
@@ -5755,7 +5999,7 @@ def send_due_date_update_email(item_id, recipient_type, new_due_date, admin_note
     # Recalculate the appropriate due date based on new contractor due date
     if item['date_received'] and new_due_date:
         due_dates = calculate_review_due_dates(
-            item['date_received'], new_due_date, item['priority']
+            item['date_received'], new_due_date, item['priority'], item['type'] or 'Submittal'
         )
         if recipient_type == 'qcr':
             new_internal_due = due_dates['qcr_due_date']
@@ -6005,11 +6249,16 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
             if not reviewer['reviewer_email']:
                 continue
             
-            # Generate form file path for link
+            # Generate form file path for link - use multi-reviewer form if applicable
             form_file_link = ''
             if is_local_mode() and folder_path != 'Not set':
-                form_result = generate_reviewer_form_html(item_id)
-                if form_result['success']:
+                if is_multi:
+                    # Multi-reviewer mode: generate individual form for this reviewer
+                    form_result = generate_multi_reviewer_form(item_id, dict(reviewer))
+                else:
+                    # Single reviewer mode: use standard form
+                    form_result = generate_reviewer_form_html(item_id)
+                if form_result.get('success'):
                     form_file_link = f'file:///{form_result["path"].replace(chr(92), "/")}'
             
             html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
@@ -6113,7 +6362,9 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
             try:
                 mail = outlook.CreateItem(0)
                 mail.To = reviewer['reviewer_email']
-                if item['qcr_email']:
+                # For single-reviewer mode, CC the QCR on reviewer emails
+                # For multi-reviewer mode, QCR gets their own separate email (sent below)
+                if not is_multi and item['qcr_email']:
                     mail.CC = item['qcr_email']
                 mail.Subject = subject
                 mail.HTMLBody = html_body
@@ -6122,7 +6373,108 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
             except Exception as e:
                 errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
         
+        # For multi-reviewer mode, send a separate notification email to QCR
+        if is_multi and item['qcr_email']:
+            try:
+                # Build QCR-specific email content (informational, no response form)
+                qcr_html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{header_color}; margin-bottom:6px;">
+        {icon} {'ITEM REOPENED' if was_closed else 'REVIEW RESTART'}: {item['identifier']}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        {status_msg}
+    </p>
+    
+    <div style="margin:15px 0; padding:12px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📋 QCR Notification</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:6px;">
+            The workflow has been restarted and new review requests have been sent to the reviewer(s).
+            You will receive their responses once submitted.
+        </div>
+    </div>
+
+    <!-- CHANGE NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#fef3c7; border:2px solid #f59e0b; border-radius:8px;">
+        <div style="font-size:15px; color:#92400e; font-weight:bold;">
+            {'⚠️ ITEM REOPENED - NEW REVIEW REQUIRED' if was_closed else '⚠️ CONTRACTOR CONTENT CHANGE'}
+        </div>
+        <div style="font-size:13px; color:#92400e; margin-top:8px;">
+            Previous responses have been cleared. Reviewers have been notified to submit new responses.
+        </div>
+    </div>
+    
+    {f'''<!-- ADMIN NOTE -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📋 What Changed (Note from Administrator):</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81;">{admin_note}</div>
+    </div>''' if admin_note else ''}
+    
+    {previous_response_html}
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Reviewers</td>
+            <td style="border:1px solid #ddd;">{', '.join([r['reviewer_name'] for r in reviewers if r['reviewer_name']])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date (QCR)</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(item['qcr_due_date'])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">
+                {f"{format_date_for_email(item['previous_due_date'])} → " if item['previous_due_date'] and item['previous_due_date'] != item['due_date'] else ""}{format_date_for_email(item['due_date'])}
+            </td>
+        </tr>
+    </table>
+
+    <!-- FOLDER LINK -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Item Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated notification. You will receive a QCR form once all reviewers have responded.</em>
+    </p>
+
+</div>"""
+                
+                qcr_mail = outlook.CreateItem(0)
+                qcr_mail.To = item['qcr_email']
+                qcr_mail.Subject = f"[LEB] {item['identifier']} – {'REOPENED: ' if was_closed else ''}Workflow Restarted (QCR Notification)"
+                qcr_mail.HTMLBody = qcr_html_body
+                qcr_mail.Send()
+                emails_sent += 1
+            except Exception as e:
+                errors.append(f"QCR ({item['qcr_name']}): {str(e)}")
+        
         # Update item to show email was sent for restart
+        now_iso = datetime.now().isoformat()
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute('''
@@ -6130,7 +6482,16 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
                 reviewer_email_sent_at = ?,
                 reviewer_response_status = 'Email Sent'
             WHERE id = ?
-        ''', (datetime.now().isoformat(), item_id))
+        ''', (now_iso, item_id))
+        
+        # Also update email_sent_at in item_reviewers table for multi-reviewer mode
+        if is_multi:
+            cursor.execute('''
+                UPDATE item_reviewers SET 
+                    email_sent_at = ?
+                WHERE item_id = ? AND needs_response = 1
+            ''', (now_iso, item_id))
+        
         conn.commit()
         conn.close()
         
@@ -6138,6 +6499,358 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
             return {'success': False, 'error': f'Sent {emails_sent}, failed: {"; ".join(errors)}'}
         
         return {'success': True, 'message': f'Workflow restart email sent to {emails_sent} reviewer(s)'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def send_revision_item_emails(item_id, parent_response, admin_note=''):
+    """Send emails to reviewers for a new revision item (created from closed parent item).
+    
+    Args:
+        item_id: The new revision item ID
+        parent_response: Dict with 'category', 'text', 'files', 'parent_identifier' from the parent item
+        admin_note: Note about what changed (e.g., "Contractor submitted Rev 1")
+    """
+    if not HAS_WIN32COM:
+        return {'success': False, 'error': 'Outlook not available'}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get item details
+    cursor.execute('''
+        SELECT i.*, 
+               ir.email as reviewer_email, ir.display_name as reviewer_name,
+               qcr.email as qcr_email, qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.id = ?
+    ''', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    item = dict(item)
+    
+    # Check if multi-reviewer mode
+    is_multi = item['multi_reviewer_mode']
+    
+    if is_multi:
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, email_token
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = cursor.fetchall()
+    else:
+        reviewers = [{
+            'reviewer_name': item['reviewer_name'],
+            'reviewer_email': item['reviewer_email'],
+            'email_token': item['email_token_reviewer']
+        }] if item.get('reviewer_email') else []
+    
+    # Fallback to item_reviewers
+    if not reviewers:
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, email_token
+            FROM item_reviewers
+            WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = cursor.fetchall()
+    
+    if not reviewers:
+        conn.close()
+        return {'success': False, 'error': 'No reviewers found'}
+    
+    conn.close()
+    
+    # Create folder link
+    folder_path = item['folder_link'] or 'Not set'
+    if folder_path != 'Not set':
+        folder_link_html = f'<a href="file:///{folder_path.replace(chr(92), "/")}" style="color:#0078D4;">{folder_path}</a>'
+    else:
+        folder_link_html = 'Not set'
+    
+    # Build previous response section from parent item
+    previous_response_html = ''
+    parent_identifier = parent_response.get('parent_identifier', 'Previous Item')
+    prev_category = parent_response.get('category')
+    prev_text = parent_response.get('text')
+    prev_files = parent_response.get('files')
+    
+    if prev_category:
+        previous_response_html = f'''
+    <!-- PREVIOUS RESPONSE FROM PARENT ITEM -->
+    <div style="margin:15px 0; padding:15px; background:#f0fdf4; border:2px solid #22c55e; border-radius:8px;">
+        <div style="font-size:14px; color:#166534; font-weight:bold;">📄 Our Previous Response (from {parent_identifier}):</div>
+        <div style="margin-top:10px;">
+            <div style="font-size:13px; color:#166534;">
+                <strong>Response Category:</strong> {prev_category}
+            </div>
+            {f'<div style="font-size:13px; color:#166534; margin-top:6px;"><strong>Comments:</strong> {prev_text}</div>' if prev_text else ''}
+            {f'<div style="font-size:13px; color:#166534; margin-top:6px;"><strong>Files:</strong> {prev_files}</div>' if prev_files else ''}
+        </div>
+    </div>'''
+    
+    subject = f"[LEB] {item['identifier']} – NEW REVISION: Review Required"
+    header_color = "#7c3aed"  # Purple for revision
+    icon = "📝"
+    
+    priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
+    
+    emails_sent = 0
+    errors = []
+    
+    pythoncom.CoInitialize()
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        
+        for reviewer in reviewers:
+            if not reviewer['reviewer_email']:
+                continue
+            
+            # Generate form for this reviewer
+            form_file_link = ''
+            if is_local_mode() and folder_path != 'Not set':
+                if is_multi:
+                    form_result = generate_multi_reviewer_form(item_id, dict(reviewer))
+                else:
+                    form_result = generate_reviewer_form_html(item_id)
+                if form_result.get('success'):
+                    form_file_link = f'file:///{form_result["path"].replace(chr(92), "/")}'
+            
+            html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{header_color}; margin-bottom:6px;">
+        {icon} NEW REVISION SUBMITTED: {item['identifier']}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        The contractor has submitted a revision. This is a <strong>new item</strong> that requires your review.
+    </p>
+
+    <!-- REVISION NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#ede9fe; border:2px solid #7c3aed; border-radius:8px;">
+        <div style="font-size:15px; color:#5b21b6; font-weight:bold;">
+            📝 CONTRACTOR REVISION - NEW REVIEW REQUIRED
+        </div>
+        <div style="font-size:13px; color:#5b21b6; margin-top:8px;">
+            This is a revision of a previously closed item. Please review the updated materials and submit your response.
+        </div>
+    </div>
+    
+    {f'''<!-- ADMIN NOTE -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📋 What Changed:</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81;">{admin_note}</div>
+    </div>''' if admin_note else ''}
+    
+    {previous_response_html}
+
+    <!-- ACTION BUTTON -->
+    {f'''<div style="margin:20px 0; text-align:center;">
+        <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+            <tr>
+                <td align="center" bgcolor="#7c3aed" style="background:#7c3aed; border-radius:8px; padding:0;">
+                    <a href="{form_file_link}" target="_blank"
+                       style="background:#7c3aed; color:#ffffff; display:inline-block; font-family:Segoe UI,Arial,sans-serif;
+                              font-size:16px; font-weight:bold; line-height:50px; text-align:center; text-decoration:none;
+                              width:280px; -webkit-text-size-adjust:none; border-radius:8px;">
+                        OPEN RESPONSE FORM
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </div>''' if form_file_link else ''}
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
+            <td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(item['initial_reviewer_due_date'])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
+        </tr>
+    </table>
+
+    <!-- FOLDER LINK -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Item Folder (review materials here):</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated notification for a new revision item.</em>
+    </p>
+
+</div>"""
+
+            try:
+                mail = outlook.CreateItem(0)
+                mail.To = reviewer['reviewer_email']
+                # For single reviewer, CC the QCR
+                if not is_multi and item.get('qcr_email'):
+                    mail.CC = item['qcr_email']
+                mail.Subject = subject
+                mail.HTMLBody = html_body
+                mail.Send()
+                emails_sent += 1
+            except Exception as e:
+                errors.append(f"{reviewer['reviewer_name']}: {str(e)}")
+        
+        # For multi-reviewer mode, send a separate notification email to QCR
+        if is_multi and item.get('qcr_email'):
+            try:
+                qcr_html_body = f"""<div style="font-family:Segoe UI, Helvetica, Arial, sans-serif; color:#333; font-size:14px; line-height:1.5;">
+
+    <!-- HEADER -->
+    <h2 style="color:{header_color}; margin-bottom:6px;">
+        {icon} NEW REVISION SUBMITTED: {item['identifier']}
+    </h2>
+
+    <p style="margin-top:0; font-size:13px; color:#666;">
+        The contractor has submitted a revision. This is a <strong>new item</strong>.
+    </p>
+    
+    <div style="margin:15px 0; padding:12px; background:#dbeafe; border:1px solid #3b82f6; border-radius:8px;">
+        <div style="font-size:14px; color:#1e40af; font-weight:bold;">📋 QCR Notification</div>
+        <div style="font-size:13px; color:#1e40af; margin-top:6px;">
+            Review requests have been sent to the reviewer(s). You will receive their responses once submitted.
+        </div>
+    </div>
+
+    <!-- REVISION NOTICE -->
+    <div style="margin:15px 0; padding:15px; background:#ede9fe; border:2px solid #7c3aed; border-radius:8px;">
+        <div style="font-size:15px; color:#5b21b6; font-weight:bold;">
+            📝 CONTRACTOR REVISION
+        </div>
+        <div style="font-size:13px; color:#5b21b6; margin-top:8px;">
+            This is a revision of previously closed item: {parent_identifier}
+        </div>
+    </div>
+    
+    {f'''<!-- ADMIN NOTE -->
+    <div style="margin:15px 0; padding:15px; background:#e0e7ff; border:2px solid #4f46e5; border-radius:8px;">
+        <div style="font-size:14px; color:#3730a3; font-weight:bold;">📋 What Changed:</div>
+        <div style="margin-top:8px; font-size:13px; color:#312e81;">{admin_note}</div>
+    </div>''' if admin_note else ''}
+    
+    {previous_response_html}
+
+    <!-- INFO TABLE -->
+    <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:15px;">
+        <tr>
+            <td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">
+                Item Information
+            </td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
+            <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
+            <td style="border:1px solid #ddd;">{item['identifier']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Title</td>
+            <td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Reviewers</td>
+            <td style="border:1px solid #ddd;">{', '.join([r['reviewer_name'] for r in reviewers if r['reviewer_name']])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Your Due Date (QCR)</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(item['qcr_due_date'])}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
+        </tr>
+    </table>
+
+    <!-- FOLDER LINK -->
+    <div style="margin-top:18px;">
+        <div style="font-weight:bold; margin-bottom:4px;">📁 Item Folder:</div>
+        <div style="padding:10px; border:1px solid #ddd; background:#fafafa; font-family:Consolas, monospace; font-size:12px; border-radius:4px;">
+            {folder_link_html}
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <p style="margin-top:20px; font-size:12px; color:#777;">
+        <em>This is an automated notification. You will receive a QCR form once all reviewers have responded.</em>
+    </p>
+
+</div>"""
+                
+                qcr_mail = outlook.CreateItem(0)
+                qcr_mail.To = item['qcr_email']
+                qcr_mail.Subject = f"[LEB] {item['identifier']} – NEW REVISION (QCR Notification)"
+                qcr_mail.HTMLBody = qcr_html_body
+                qcr_mail.Send()
+                emails_sent += 1
+            except Exception as e:
+                errors.append(f"QCR ({item.get('qcr_name', 'Unknown')}): {str(e)}")
+        
+        # Update item to show emails were sent
+        now_iso = datetime.now().isoformat()
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE item SET 
+                reviewer_email_sent_at = ?,
+                reviewer_response_status = 'Email Sent'
+            WHERE id = ?
+        ''', (now_iso, item_id))
+        
+        # Update email_sent_at in item_reviewers table
+        if is_multi:
+            cursor.execute('''
+                UPDATE item_reviewers SET email_sent_at = ?
+                WHERE item_id = ? AND needs_response = 1
+            ''', (now_iso, item_id))
+        
+        conn.commit()
+        conn.close()
+        
+        if errors:
+            return {'success': False, 'error': f'Sent {emails_sent}, failed: {"; ".join(errors)}', 'emails_sent': emails_sent}
+        
+        return {'success': True, 'message': f'Revision emails sent to {emails_sent} recipient(s)', 'emails_sent': emails_sent}
     except Exception as e:
         return {'success': False, 'error': str(e)}
     finally:
@@ -6176,9 +6889,15 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         return {'success': False, 'error': 'No QCR assigned'}
     
     # Get all reviewers (from item_reviewers table for multi-reviewer items)
-    cursor.execute('SELECT reviewer_email FROM item_reviewers WHERE item_id = ?', (item_id,))
+    cursor.execute('SELECT reviewer_email, reviewer_name FROM item_reviewers WHERE item_id = ?', (item_id,))
     multi_reviewers = cursor.fetchall()
     all_reviewer_emails = [r['reviewer_email'] for r in multi_reviewers if r['reviewer_email']]
+    
+    # Also get reviewer names from item_reviewers if not set from user table
+    if not item.get('reviewer_name') and multi_reviewers:
+        reviewer_names = [r['reviewer_name'] for r in multi_reviewers if r['reviewer_name']]
+        if reviewer_names:
+            item['reviewer_name'] = ', '.join(reviewer_names)
     
     # Add single reviewer if exists and not already in list
     if item['reviewer_email'] and item['reviewer_email'] not in all_reviewer_emails:
@@ -6191,7 +6910,8 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         calculated = calculate_review_due_dates(
             item['date_received'],
             item['due_date'],
-            item['priority']
+            item['priority'],
+            item['type'] or 'Submittal'
         )
         # Use calculated value if database value is missing
         if not qcr_due_date_email:
@@ -6228,12 +6948,18 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         history_parts = [f"v{h['version']} ({h['submitted_at'][:16].replace('T', ' ')})" for h in history]
         version_history_html = f"<p style='font-size: 12px; color: #666;'><strong>Previous versions:</strong> {', '.join(history_parts)}</p>"
     
-    # Format reviewer response time
+    # Format reviewer response time (convert UTC to PST and format nicely)
     reviewer_response_time = item['reviewer_response_at'] or 'N/A'
     if reviewer_response_time != 'N/A':
         try:
             dt = datetime.fromisoformat(reviewer_response_time.replace('Z', '+00:00'))
-            reviewer_response_time = dt.strftime('%Y-%m-%d %H:%M')
+            # Convert UTC to PST (UTC-8)
+            from datetime import timedelta
+            pst_dt = dt - timedelta(hours=8)
+            # Format as "2:40PM Fri, 1/30/26"
+            hour = pst_dt.hour % 12 or 12
+            am_pm = 'AM' if pst_dt.hour < 12 else 'PM'
+            reviewer_response_time = f"{hour}:{pst_dt.minute:02d}{am_pm} {pst_dt.strftime('%a')}, {pst_dt.month}/{pst_dt.day}/{pst_dt.strftime('%y')}"
         except:
             pass
     
@@ -6360,7 +7086,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
 
         <tr>
@@ -6380,12 +7106,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(qcr_due_date_email)}</td>
         </tr>
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
     </table>
 
@@ -6397,10 +7123,10 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             </td>
         </tr>
 
-        <tr>
+        {f'''<tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Category</td>
             <td style="border:1px solid #ddd; color:#1e8449; font-weight:bold;">{item['reviewer_response_category'] or 'Not specified'}</td>
-        </tr>
+        </tr>''' if (item.get('type') or '').upper() != 'RFI' else ''}
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Selected Files</td>
@@ -6518,7 +7244,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
 
         <tr>
@@ -6538,12 +7264,12 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{qcr_due_date_email or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(qcr_due_date_email)}</td>
         </tr>
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
     </table>
 
@@ -6555,10 +7281,10 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             </td>
         </tr>
 
-        <tr>
+        {f'''<tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Category</td>
             <td style="border:1px solid #ddd; color:#1e8449; font-weight:bold;">{item['reviewer_response_category'] or 'Not specified'}</td>
-        </tr>
+        </tr>''' if (item.get('type') or '').upper() != 'RFI' else ''}
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Selected Files</td>
@@ -7448,7 +8174,8 @@ def send_multi_reviewer_assignment_emails(item_id):
         calculated = calculate_review_due_dates(
             item['date_received'],
             item['due_date'],
-            item['priority']
+            item['priority'],
+            item['type'] or 'Submittal'
         )
         if not reviewer_due_date:
             reviewer_due_date = calculated['initial_reviewer_due_date']
@@ -9011,7 +9738,8 @@ def api_get_items():
                    )
                    ELSE ir.display_name 
                END as initial_reviewer_name,
-               qcr.display_name as qcr_name
+               qcr.display_name as qcr_name,
+               qcr.email as qcr_email
         FROM item i
         LEFT JOIN user u ON i.assigned_to_user_id = u.id
         LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
@@ -9041,10 +9769,36 @@ def api_get_items():
     if show_closed != 'true':
         query += " AND i.closed_at IS NULL"
     
-    query += ' ORDER BY i.date_received DESC, i.created_at DESC'
+    # Order by contractor due date (soonest first), then by date received
+    # Items without due dates go to the end
+    query += ' ORDER BY i.closed_at IS NULL DESC, i.due_date IS NULL ASC, i.due_date ASC, i.date_received DESC'
     
     cursor.execute(query, params)
     items = [dict(row) for row in cursor.fetchall()]
+    
+    # Add review_due_soon flag for items where any reviewer due date is within 2 days
+    today = datetime.now().date()
+    two_days_from_now = today + timedelta(days=2)
+    
+    for item in items:
+        review_due_soon = False
+        # Check initial reviewer due date
+        if item.get('initial_reviewer_due_date'):
+            try:
+                ir_due = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+                if ir_due <= two_days_from_now and item.get('reviewer_response_status') != 'Complete':
+                    review_due_soon = True
+            except:
+                pass
+        # Check QCR due date
+        if item.get('qcr_due_date') and not review_due_soon:
+            try:
+                qcr_due = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+                if qcr_due <= two_days_from_now and item.get('qcr_response_status') != 'Complete':
+                    review_due_soon = True
+            except:
+                pass
+        item['review_due_soon'] = review_due_soon
     conn.close()
     
     return jsonify(items)
@@ -9066,7 +9820,8 @@ def api_get_item(item_id):
                    )
                    ELSE ir.display_name 
                END as initial_reviewer_name,
-               qcr.display_name as qcr_name
+               qcr.display_name as qcr_name,
+               qcr.email as qcr_email
         FROM item i
         LEFT JOIN user u ON i.assigned_to_user_id = u.id
         LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
@@ -9108,21 +9863,26 @@ def api_update_item(item_id):
     """Update an item with validation for reviewers."""
     data = request.get_json()
     
-    # Validate that initial_reviewer_id and qcr_id are not the same
-    initial_reviewer_id = data.get('initial_reviewer_id')
+    # Get initial reviewer IDs from item_reviewers table for validation
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM item_reviewers WHERE item_id = ?', (item_id,))
+    initial_reviewer_ids = [row['user_id'] for row in cursor.fetchall()]
+    
     qcr_id = data.get('qcr_id')
     
-    if initial_reviewer_id and qcr_id and str(initial_reviewer_id) == str(qcr_id):
+    # Validate QCR is not also an initial reviewer
+    if qcr_id and int(qcr_id) in initial_reviewer_ids:
         return jsonify({'error': 'Initial Reviewer and QCR must be different users'}), 400
     
     # Check if user is manually setting due dates
     manual_initial_due = 'initial_reviewer_due_date' in data
     manual_qcr_due = 'qcr_due_date' in data
     
-    # Fields that can be updated
+    # Fields that can be updated (removed initial_reviewer_id - use item_reviewers table instead)
     allowed_fields = [
         'title', 'due_date', 'priority', 'status', 'assigned_to_user_id', 'notes', 'folder_link',
-        'initial_reviewer_id', 'qcr_id', 'date_received',
+        'qcr_id', 'date_received',
         'initial_reviewer_due_date', 'qcr_due_date', 'rfi_question'
     ]
     updates = []
@@ -9139,9 +9899,6 @@ def api_update_item(item_id):
     
     params.append(item_id)
     
-    conn = get_db()
-    cursor = conn.cursor()
-    
     # Get current item data to check for recalculation needs
     cursor.execute('SELECT date_received, due_date, priority FROM item WHERE id = ?', (item_id,))
     current = cursor.fetchone()
@@ -9156,15 +9913,16 @@ def api_update_item(item_id):
     needs_recalc = any(field in data for field in recalc_fields) and not manual_initial_due and not manual_qcr_due
     
     if needs_recalc:
-        # Get updated values
-        cursor.execute('SELECT date_received, due_date, priority FROM item WHERE id = ?', (item_id,))
+        # Get updated values including type
+        cursor.execute('SELECT date_received, due_date, priority, type FROM item WHERE id = ?', (item_id,))
         updated = cursor.fetchone()
         
         if updated['date_received'] and updated['due_date']:
             due_dates = calculate_review_due_dates(
                 updated['date_received'],
                 updated['due_date'],
-                updated['priority']
+                updated['priority'],
+                updated['type'] or 'Submittal'
             )
             
             cursor.execute('''
@@ -9905,10 +10663,92 @@ def api_update_config():
         if key in data:
             CONFIG[key] = data[key]
     
+    # Handle due_date_settings separately
+    if 'due_date_settings' in data:
+        if 'due_date_settings' not in CONFIG:
+            CONFIG['due_date_settings'] = {}
+        CONFIG['due_date_settings'].update(data['due_date_settings'])
+    
     with open(CONFIG_PATH, 'w') as f:
         json.dump(CONFIG, f, indent=2)
     
     return jsonify(CONFIG)
+
+@app.route('/api/config/due-dates', methods=['GET'])
+@admin_required
+def api_get_due_date_settings():
+    """Get due date settings."""
+    settings = CONFIG.get('due_date_settings', DEFAULT_CONFIG.get('due_date_settings', {}))
+    return jsonify(settings)
+
+@app.route('/api/config/due-dates', methods=['POST'])
+@admin_required
+def api_update_due_date_settings():
+    """Update due date settings and optionally recalculate all items."""
+    global CONFIG
+    data = request.get_json()
+    
+    # Update settings
+    if 'due_date_settings' not in CONFIG:
+        CONFIG['due_date_settings'] = {}
+    
+    if 'submittal' in data:
+        CONFIG['due_date_settings']['submittal'] = data['submittal']
+    if 'rfi' in data:
+        CONFIG['due_date_settings']['rfi'] = data['rfi']
+    if 'qcr_days_before_due' in data:
+        CONFIG['due_date_settings']['qcr_days_before_due'] = data['qcr_days_before_due']
+    if 'qcr_review_days' in data:
+        CONFIG['due_date_settings']['qcr_review_days'] = data['qcr_review_days']
+    
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(CONFIG, f, indent=2)
+    
+    # Optionally recalculate all items
+    recalculated = 0
+    if data.get('recalculate_all'):
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get all items with dates
+        cursor.execute('''
+            SELECT id, type, date_received, due_date, priority
+            FROM item
+            WHERE date_received IS NOT NULL AND due_date IS NOT NULL
+        ''')
+        items = cursor.fetchall()
+        
+        for item in items:
+            item_type = item['type'] or 'Submittal'
+            due_dates = calculate_review_due_dates(
+                item['date_received'],
+                item['due_date'],
+                item['priority'],
+                item_type
+            )
+            
+            cursor.execute('''
+                UPDATE item SET
+                    initial_reviewer_due_date = ?,
+                    qcr_due_date = ?,
+                    is_contractor_window_insufficient = ?
+                WHERE id = ?
+            ''', (
+                due_dates['initial_reviewer_due_date'],
+                due_dates['qcr_due_date'],
+                1 if due_dates['is_contractor_window_insufficient'] else 0,
+                item['id']
+            ))
+            recalculated += 1
+        
+        conn.commit()
+        conn.close()
+    
+    return jsonify({
+        'success': True,
+        'settings': CONFIG['due_date_settings'],
+        'recalculated_count': recalculated
+    })
 
 # =============================================================================
 # API ROUTES - AIRTABLE SYNC
@@ -10695,9 +11535,10 @@ def api_review_update(item_id):
                 # Recalculate review due dates
                 date_received = item['date_received']
                 priority = update_history['new_priority'] or item['priority']
+                item_type = item['type'] or 'Submittal'
                 if date_received:
                     due_dates = calculate_review_due_dates(
-                        date_received, update_history['new_due_date'], priority
+                        date_received, update_history['new_due_date'], priority, item_type
                     )
                     updates.extend([
                         'initial_reviewer_due_date = ?',
@@ -10803,9 +11644,10 @@ def api_review_update(item_id):
             # For reopened items, use today as the "received" date for calculating reviewer timeline
             date_received = datetime.now().strftime('%Y-%m-%d')
         
+        item_type = item['type'] or 'Submittal'
         if current_due_date and date_received:
             due_dates = calculate_review_due_dates(
-                date_received, current_due_date, current_priority
+                date_received, current_due_date, current_priority, item_type
             )
             updates.extend([
                 'initial_reviewer_due_date = ?',
@@ -11840,23 +12682,29 @@ def main():
     print("Starting folder response watcher...")
     folder_watcher.start()
     
-    # Start reminder scheduler
-    print("Starting reminder scheduler...")
-    reminder_scheduler.start()
-    
     # Process any pending reminders on startup (in case server was off at 8 AM)
+    # Do this BEFORE starting the scheduler to avoid race condition
     print("Checking for pending reminders...")
     try:
         results = process_all_reminders()
         total_sent = results.get('single_reviewer_sent', 0) + results.get('multi_reviewer_sent', 0) + results.get('multi_reviewer_qcr_sent', 0)
         if total_sent > 0:
             print(f"  Sent {total_sent} pending reminder(s)")
+            # Mark today as processed so scheduler doesn't duplicate
+            reminder_scheduler.last_reminder_date = get_pst_now().date()
         elif results.get('processed') == False:
             print(f"  {results.get('reason', 'No reminders needed')}")
         else:
             print("  No reminders needed")
+            # Still mark today as processed if we checked
+            if is_past_reminder_time_today():
+                reminder_scheduler.last_reminder_date = get_pst_now().date()
     except Exception as e:
         print(f"  Reminder check error: {e}")
+    
+    # Start reminder scheduler (after manual check to avoid race)
+    print("Starting reminder scheduler...")
+    reminder_scheduler.start()
     
     # Start web server
     port = CONFIG.get('server_port', 5000)

@@ -298,7 +298,7 @@
         <!-- Reviewer's Submitted Response -->
         <div class="reviewer-response-box">
             <h3>Initial Reviewer's Submitted Response</h3>
-            <div class="info-row">
+            <div class="info-row" id="reviewer-category-row">
                 <span class="info-label">Category:</span>
                 <span class="info-value" style="font-weight: 600; color: #166534;">{{REVIEWER_RESPONSE_CATEGORY}}</span>
             </div>
@@ -457,6 +457,14 @@
                 }
             }
             
+            // Hide category row for RFIs
+            if (ITEM_CONFIG.item_type.toUpperCase() === "RFI") {
+                var reviewerCategoryRow = document.getElementById("reviewer-category-row");
+                if (reviewerCategoryRow) {
+                    reviewerCategoryRow.style.display = "none";
+                }
+            }
+            
             // Get original reviewer text from notes
             var notesEl = document.getElementById("reviewer_notes_display");
             if (notesEl) {
@@ -500,6 +508,7 @@
             var submitBtn = document.getElementById("submit-btn");
             var textReadonly = document.getElementById("response_text_readonly");
             var textArea = document.getElementById("response_text_area");
+            var isRFI = ITEM_CONFIG.item_type.toUpperCase() === "RFI";
             
             if (action === "Send Back") {
                 responseModeGroup.style.display = "none";
@@ -521,7 +530,7 @@
                 textArea.value = originalReviewerText;
             } else {
                 responseModeGroup.style.display = "block";
-                categoryGroup.style.display = "block";
+                categoryGroup.style.display = isRFI ? "none" : "block";
                 filesGroup.style.display = "block";
                 sendBackWarning.style.display = "none";
                 notesRequired.style.display = "none";
