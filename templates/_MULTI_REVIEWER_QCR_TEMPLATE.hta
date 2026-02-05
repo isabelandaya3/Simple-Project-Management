@@ -222,6 +222,72 @@
             text-align: center;
         }
         .hidden { display: none !important; }
+        
+        /* File selection styles */
+        .file-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .file-list {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 12px;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            background: white;
+        }
+        .file-item:hover { background: #e9ecef; }
+        .file-item input[type="checkbox"] { 
+            margin-right: 10px; 
+            width: 18px;
+            height: 18px;
+        }
+        .file-item label {
+            margin-bottom: 0;
+            font-weight: normal;
+            color: #333;
+            cursor: pointer;
+            word-break: break-all;
+            flex: 1;
+        }
+        .folder-info {
+            background: #e7f3ff;
+            border: 1px solid #b3d7ff;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        .folder-info strong { color: #004085; }
+        .folder-path {
+            font-family: 'Consolas', monospace;
+            font-size: 11px;
+            background: #f8f9fa;
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+            display: block;
+        }
+        .open-folder-btn {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #17a2b8;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .open-folder-btn:hover { background: #138496; }
     </style>
 </head>
 <body>
@@ -260,6 +326,12 @@
         <div class="bluebeam-notice">
             <h3>Markups Location</h3>
             <p>All reviewer markups are in the corresponding <strong>Bluebeam Studio session</strong> for this item. Please review the markups there before completing your QC decision.</p>
+        </div>
+        
+        <div class="folder-info">
+            <strong>Item Folder:</strong>
+            <span class="folder-path" id="folder-path">{{FOLDER_PATH_RAW}}</span>
+            <button class="open-folder-btn" onclick="openFolder()">Open Folder</button>
         </div>
 
         <!-- RFI Question Section (shown only for RFI items) -->
@@ -320,6 +392,21 @@
                     <label for="response_text">Final Response Description *</label>
                     <textarea name="response_text" id="response_text" placeholder="Write the official response to be sent to the contractor..."></textarea>
                 </div>
+                
+                <!-- Optional File Attachments for QCR -->
+                <div class="form-group">
+                    <p class="section-title" style="font-size:14px; margin-bottom:8px;">Attach Files (Optional)</p>
+                    <div class="file-section">
+                        <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+                            Optionally select PDF files from the item folder to include with your response.
+                        </p>
+                        <div class="file-list" id="file-list">
+                            <p style="color: #888; padding: 8px; text-align: center;">Loading files...</p>
+                        </div>
+                        <button type="button" onclick="loadFolderFiles()" style="margin-top: 10px; padding: 8px 16px; background: #6c757d; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;">Refresh File List</button>
+                        <span style="font-size: 12px; color: #888; margin-left: 10px;">Click to detect newly added files</span>
+                    </div>
+                </div>
             </div>
             
             <!-- Send Back Fields -->
@@ -375,12 +462,73 @@
                     rfiSection.style.display = 'block';
                 }
             }
+            // Load files for potential selection
+            loadFolderFiles();
         };
         
         var fso = new ActiveXObject("Scripting.FileSystemObject");
         var shell = new ActiveXObject("WScript.Shell");
         
         var selectedAction = "";
+        
+        // Get folder path from the HTML element (avoids JS escaping issues)
+        function getFolderPath() {
+            return document.getElementById("folder-path").innerText;
+        }
+        
+        function openFolder() {
+            var folderPath = getFolderPath();
+            if (fso.FolderExists(folderPath)) {
+                shell.Run('explorer.exe "' + folderPath + '"', 1, false);
+            } else {
+                alert("Folder not found: " + folderPath);
+            }
+        }
+        
+        function loadFolderFiles() {
+            var folderPath = getFolderPath();
+            var fileListEl = document.getElementById("file-list");
+            
+            if (!fso.FolderExists(folderPath)) {
+                fileListEl.innerHTML = "<p style='color: #dc3545; padding: 8px;'>Folder not found</p>";
+                return;
+            }
+            
+            // Use DIR command to list PDFs - works better with special characters in paths
+            var exec = shell.Exec('cmd /c dir /b "' + folderPath + '\\*.pdf"');
+            var output = exec.StdOut.ReadAll();
+            var html = "";
+            var count = 0;
+            
+            if (output && output.length > 0) {
+                var fileNames = output.split("\r\n");
+                for (var i = 0; i < fileNames.length; i++) {
+                    var fileName = fileNames[i].replace(/^\s+|\s+$/g, ''); // trim
+                    if (fileName.length > 0) {
+                        html += "<div class='file-item'>" +
+                            "<input type='checkbox' name='selected_files' value='" + fileName.replace(/'/g, "&#39;") + "' id='file_" + count + "'>" +
+                            "<label for='file_" + count + "'>" + fileName + "</label>" +
+                            "</div>";
+                        count++;
+                    }
+                }
+            }
+            
+            if (count === 0) {
+                fileListEl.innerHTML = "<p style='color: #888; padding: 8px; text-align: center;'>No PDF files found in the item folder</p>";
+            } else {
+                fileListEl.innerHTML = html;
+            }
+        }
+        
+        function getSelectedFiles() {
+            var selected = [];
+            var checkboxes = document.querySelectorAll('input[name="selected_files"]:checked');
+            for (var i = 0; i < checkboxes.length; i++) {
+                selected.push(checkboxes[i].value);
+            }
+            return selected;
+        }
         
         function handleActionChange(action) {
             selectedAction = action;
@@ -459,6 +607,10 @@
                 
                 response.response_category = category;
                 response.response_text = responseText;
+                
+                // Get selected files
+                var selectedFiles = getSelectedFiles();
+                response.attached_files = selectedFiles;
             } else {
                 var sendbackNotes = document.getElementById("sendback_notes").value;
                 if (!sendbackNotes.trim()) {

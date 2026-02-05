@@ -4100,6 +4100,10 @@ def process_multi_reviewer_response_json(json_path):
         # Calculate new version
         new_version = (reviewer['response_version'] or 0) + 1
         
+        # Get attached files (if any)
+        attached_files = data.get('attached_files', [])
+        attached_files_json = json.dumps(attached_files) if attached_files else None
+        
         # Update reviewer response (allow resubmissions)
         cursor.execute('''
             UPDATE item_reviewers SET
@@ -4107,13 +4111,15 @@ def process_multi_reviewer_response_json(json_path):
                 response_category = ?,
                 internal_notes = ?,
                 response_version = ?,
-                needs_response = 0
+                needs_response = 0,
+                attached_files = ?
             WHERE id = ?
         ''', (
             data.get('_submitted_at', datetime.now().isoformat()),
             response_category,
             internal_notes,
             new_version,
+            attached_files_json,
             reviewer['id']
         ))
         
@@ -4299,6 +4305,10 @@ def process_multi_reviewer_qcr_response_json(json_path):
             response_text = data.get('response_text', '')
             qcr_internal_notes = data.get('qcr_internal_notes', '')
             
+            # Get attached files (if any)
+            attached_files = data.get('attached_files', [])
+            attached_files_json = json.dumps(attached_files) if attached_files else None
+            
             cursor.execute('''
                 UPDATE item SET
                     qcr_action = 'Approve',
@@ -4311,6 +4321,7 @@ def process_multi_reviewer_qcr_response_json(json_path):
                     qcr_response_category = ?,
                     final_response_category = ?,
                     final_response_text = ?,
+                    qcr_attached_files = ?,
                     status = 'Ready for Response'
                 WHERE id = ?
             ''', (
@@ -4321,6 +4332,7 @@ def process_multi_reviewer_qcr_response_json(json_path):
                 response_category,
                 response_category,
                 response_text,
+                attached_files_json,
                 item_id
             ))
             conn.commit()
@@ -9411,6 +9423,14 @@ def generate_multi_reviewer_qcr_form(item_id):
             category = r['response_category'] or 'N/A'
             notes = r['internal_notes'] or ''
             
+            # Parse attached files if any
+            attached_files = []
+            if r.get('attached_files'):
+                try:
+                    attached_files = json.loads(r['attached_files'])
+                except:
+                    pass
+            
             notes_section = ""
             if notes:
                 notes_section = f'''
@@ -9421,6 +9441,16 @@ def generate_multi_reviewer_qcr_form(item_id):
             else:
                 notes_section = '<p class="no-notes">No suggested response provided.</p>'
             
+            # Build attached files section
+            files_section = ""
+            if attached_files:
+                files_list = "".join([f'<li style="margin-bottom:4px;">{html_escape(f)}</li>' for f in attached_files])
+                files_section = f'''
+            <div class="attached-files-box" style="background:#e0f2fe; border:1px solid #7dd3fc; border-radius:6px; padding:10px; margin-top:10px;">
+                <h5 style="margin:0 0 6px 0; color:#0369a1; font-size:12px;">📎 Attached Files ({len(attached_files)}):</h5>
+                <ul style="margin:0; padding-left:20px; color:#0369a1; font-size:13px;">{files_list}</ul>
+            </div>'''
+            
             reviewer_html += f'''
         <div class="reviewer-response-box">
             <div class="reviewer-header">
@@ -9429,6 +9459,7 @@ def generate_multi_reviewer_qcr_form(item_id):
                 <span class="category-chip">{category}</span>
             </div>
             {notes_section}
+            {files_section}
         </div>'''
             
             # Build checkbox for send-back selection
