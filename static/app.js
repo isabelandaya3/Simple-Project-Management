@@ -19,7 +19,9 @@ const state = {
     selectedItemId: null,
     workflowItems: [],
     selectedItemIds: [],  // For multi-select
-    selectMode: false     // Whether we're in selection mode
+    selectMode: false,    // Whether we're in selection mode
+    projects: [],         // Available projects
+    currentProject: null  // Currently selected project
 };
 
 // =============================================================================
@@ -190,6 +192,54 @@ function toggle(element) {
     }
 }
 
+/**
+ * Show a toast notification
+ */
+function showToast(message, type = 'info') {
+    // Remove any existing toast
+    const existingToast = document.querySelector('.toast-notification');
+    if (existingToast) {
+        existingToast.remove();
+    }
+    
+    // Create toast element
+    const toast = document.createElement('div');
+    toast.className = 'toast-notification';
+    
+    // Set colors based on type
+    const colors = {
+        'success': { bg: '#d4edda', border: '#28a745', text: '#155724' },
+        'warning': { bg: '#fff3cd', border: '#ffc107', text: '#856404' },
+        'error': { bg: '#f8d7da', border: '#dc3545', text: '#721c24' },
+        'info': { bg: '#d1ecf1', border: '#17a2b8', text: '#0c5460' }
+    };
+    const color = colors[type] || colors.info;
+    
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 12px 20px;
+        background: ${color.bg};
+        border: 1px solid ${color.border};
+        border-radius: 4px;
+        color: ${color.text};
+        font-size: 14px;
+        z-index: 10000;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        animation: slideIn 0.3s ease;
+    `;
+    toast.textContent = message;
+    
+    document.body.appendChild(toast);
+    
+    // Auto-remove after 4 seconds
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
+}
+
 // =============================================================================
 // AUTHENTICATION
 // =============================================================================
@@ -232,16 +282,22 @@ function showApp() {
         // Show/hide admin features
         const manageUsersBtn = document.getElementById('btn-manage-users');
         const pendingUpdatesNav = document.getElementById('nav-pending-updates');
+        const addProjectBtn = document.getElementById('btn-add-project');
         
         if (state.user.role !== 'admin') {
             manageUsersBtn.style.display = 'none';
             if (pendingUpdatesNav) pendingUpdatesNav.style.display = 'none';
+            if (addProjectBtn) addProjectBtn.style.display = 'none';
         } else {
             manageUsersBtn.style.display = 'flex';
             // Show pending updates nav for admins, load count
             if (pendingUpdatesNav) {
                 pendingUpdatesNav.style.display = 'flex';
                 loadPendingUpdatesCount();
+            }
+            // Show add project button for admins
+            if (addProjectBtn) {
+                addProjectBtn.style.display = 'inline-flex';
             }
         }
     }
@@ -303,6 +359,163 @@ function toggleSidebar() {
 }
 
 // =============================================================================
+// PROJECT MANAGEMENT
+// =============================================================================
+
+/**
+ * Load available projects for the current user
+ */
+async function loadProjects() {
+    try {
+        const data = await api('/projects');
+        state.projects = data.projects || [];
+        
+        // Update project selector dropdown
+        const selector = document.getElementById('project-selector');
+        if (selector) {
+            if (state.projects.length > 0) {
+                selector.innerHTML = state.projects.map(p => 
+                    `<option value="${p.id}">${p.short_name}</option>`
+                ).join('');
+                
+                // Set current project
+                if (data.current_project_id) {
+                    selector.value = data.current_project_id;
+                    await loadCurrentProject();
+                } else if (state.projects.length > 0) {
+                    // Default to first project
+                    await switchProject(state.projects[0].id);
+                }
+            } else {
+                selector.innerHTML = '<option value="">No projects</option>';
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load projects:', e);
+    }
+}
+
+/**
+ * Load current project details
+ */
+async function loadCurrentProject() {
+    try {
+        const project = await api('/projects/current');
+        if (project) {
+            state.currentProject = project;
+            
+            // Update app title with short name
+            const appTitle = document.getElementById('app-title');
+            if (appTitle) {
+                appTitle.textContent = project.short_name || 'Tracker';
+            }
+            
+            // Update project name display
+            const projectName = document.getElementById('project-name');
+            if (projectName) {
+                projectName.textContent = project.name;
+            }
+            
+            // Update page title
+            document.title = `${project.short_name} Tracker - RFI & Submittal Management`;
+        }
+    } catch (e) {
+        console.error('Failed to load current project:', e);
+    }
+}
+
+/**
+ * Switch to a different project
+ */
+async function switchProject(projectId) {
+    try {
+        await api(`/projects/switch/${projectId}`, { method: 'POST' });
+        await loadCurrentProject();
+        // Reload items for the new project
+        await loadItems();
+        await loadStats();
+    } catch (e) {
+        console.error('Failed to switch project:', e);
+        showNotification('Failed to switch project', 'error');
+    }
+}
+
+/**
+ * Handle project selector change
+ */
+function handleProjectChange(event) {
+    const projectId = event.target.value;
+    if (projectId) {
+        switchProject(parseInt(projectId));
+    }
+}
+
+/**
+ * Open Add Project modal (for admins)
+ */
+function openAddProjectModal() {
+    // Clear form
+    document.getElementById('project-name-input').value = '';
+    document.getElementById('project-short-name').value = '';
+    document.getElementById('project-description').value = '';
+    document.getElementById('project-base-folder').value = '';
+    document.getElementById('project-outlook-folder').value = 'Inbox';
+    document.getElementById('project-user-names').value = '';
+    document.getElementById('project-rfi-excel').value = '';
+    document.getElementById('project-submittal-excel').value = '';
+    
+    show('project-modal');
+}
+
+/**
+ * Close Add Project modal
+ */
+function closeProjectModal() {
+    hide('project-modal');
+}
+
+/**
+ * Handle new project form submission
+ */
+async function handleNewProject(e) {
+    e.preventDefault();
+    
+    const userNamesText = document.getElementById('project-user-names').value;
+    const userNames = userNamesText.split('\n').filter(n => n.trim()).map(n => n.trim());
+    
+    const projectData = {
+        name: document.getElementById('project-name-input').value,
+        short_name: document.getElementById('project-short-name').value.toUpperCase(),
+        description: document.getElementById('project-description').value,
+        base_folder_path: document.getElementById('project-base-folder').value,
+        outlook_folder: document.getElementById('project-outlook-folder').value || 'Inbox',
+        user_names: userNames,
+        rfi_tracker_excel_path: document.getElementById('project-rfi-excel').value,
+        submittal_tracker_excel_path: document.getElementById('project-submittal-excel').value
+    };
+    
+    try {
+        const result = await api('/projects', {
+            method: 'POST',
+            body: JSON.stringify(projectData)
+        });
+        
+        if (result.success) {
+            showNotification(`Project "${projectData.short_name}" created successfully!`, 'success');
+            closeProjectModal();
+            
+            // Reload projects and switch to the new one
+            await loadProjects();
+            await switchProject(result.project_id);
+        } else {
+            showNotification(result.error || 'Failed to create project', 'error');
+        }
+    } catch (e) {
+        showNotification(e.message || 'Failed to create project', 'error');
+    }
+}
+
+// =============================================================================
 // DATA LOADING
 // =============================================================================
 
@@ -310,6 +523,7 @@ function toggleSidebar() {
  * Load initial data
  */
 async function loadInitialData() {
+    await loadProjects();  // Load projects first
     await Promise.all([
         loadItems(),
         loadUsers(),
@@ -437,6 +651,7 @@ function generateItemRow(item) {
             <td>${formatDate(item.initial_reviewer_due_date)}</td>
             <td>${formatDate(item.qcr_due_date)}</td>
             <td><span class="chip chip-status">${escapeHtml(item.status)}</span></td>
+            <td>${escapeHtml(item.ball_in_court) || '<span class="text-muted">-</span>'}</td>
             <td>${escapeHtml(item.initial_reviewer_name) || '<span class="text-muted">-</span>'}</td>
             <td>${escapeHtml(item.qcr_name) || '<span class="text-muted">-</span>'}</td>
         </tr>
@@ -469,7 +684,7 @@ function renderItems() {
     // Add closed items section if there are any
     if (closedItems.length > 0) {
         const isExpanded = state.closedSectionExpanded || false;
-        const colSpan = state.selectMode ? 12 : 11;
+        const colSpan = state.selectMode ? 13 : 12;
         
         html += `
             <tr class="closed-section-header" onclick="toggleClosedSection()">
@@ -650,6 +865,27 @@ async function populateDetailDrawer(item) {
     document.getElementById('detail-status').value = item.status || 'Unassigned';
     document.getElementById('detail-folder').value = item.folder_link || '';
     document.getElementById('detail-notes').value = item.notes || '';
+    
+    // Folder validation - show warning if folder is missing
+    const folderWarningBanner = document.getElementById('folder-warning-banner');
+    const relocateFolderBtn = document.getElementById('btn-relocate-folder');
+    const relocateFolderPanel = document.getElementById('relocate-folder-panel');
+    
+    // Always hide the relocate panel initially
+    hide(relocateFolderPanel);
+    
+    if (item.folder_missing) {
+        show(folderWarningBanner);
+        show(relocateFolderBtn);
+    } else {
+        hide(folderWarningBanner);
+        hide(relocateFolderBtn);
+        
+        // Show a brief notification if folder was auto-reconciled
+        if (item.folder_reconciled) {
+            showToast('Folder path was automatically updated to match renamed folder', 'success');
+        }
+    }
     
     // RFI Question field - show only for RFI type
     const rfiQuestionSection = document.getElementById('rfi-question-section');
@@ -997,6 +1233,130 @@ async function openFilesFolder(folderPath) {
         }).catch(() => {
             alert(`Could not open folder.\n\nManually navigate to:\n${folderPath}`);
         });
+    }
+}
+
+/**
+ * Show the relocate folder panel and load potential matches
+ */
+async function showRelocateFolderPanel() {
+    const itemId = state.selectedItemId;
+    if (!itemId) return;
+    
+    const panel = document.getElementById('relocate-folder-panel');
+    const folderList = document.getElementById('relocate-folder-list');
+    const inputField = document.getElementById('relocate-folder-input');
+    
+    // Clear previous content
+    folderList.innerHTML = '<p style="color: #666; font-size: 12px;">Searching for matching folders...</p>';
+    inputField.value = '';
+    
+    show(panel);
+    
+    try {
+        const result = await api(`/item/${itemId}/browse-folders`);
+        
+        if (result.success && result.folders.length > 0) {
+            folderList.innerHTML = result.folders.map(folder => `
+                <div class="relocate-folder-option" style="padding: 5px; margin-bottom: 5px; background: ${folder.exact_match ? '#d4edda' : '#fff'}; border: 1px solid ${folder.exact_match ? '#28a745' : '#ddd'}; border-radius: 4px; cursor: pointer; font-size: 12px;" 
+                     onclick="selectRelocateFolder('${escapeHtml(folder.path.replace(/\\/g, '\\\\'))}')">
+                    <span style="display: block; font-weight: ${folder.exact_match ? 'bold' : 'normal'};">${escapeHtml(folder.name)}</span>
+                    ${folder.exact_match ? '<span style="color: #28a745; font-size: 10px;">✓ Exact match</span>' : ''}
+                </div>
+            `).join('');
+            
+            // Add search path info
+            folderList.innerHTML = `<p style="color: #666; font-size: 11px; margin-bottom: 8px;">Looking in: ${escapeHtml(result.search_path)}<br>Expected: ${escapeHtml(result.expected_prefix)}*</p>` + folderList.innerHTML;
+        } else {
+            folderList.innerHTML = `
+                <p style="color: #856404; font-size: 12px;">No matching folders found in expected location.</p>
+                <p style="color: #666; font-size: 11px;">Search path: ${escapeHtml(result.search_path || 'N/A')}</p>
+                <p style="color: #666; font-size: 11px;">Please enter the full path manually below.</p>
+            `;
+        }
+    } catch (e) {
+        console.error('Error loading folder options:', e);
+        folderList.innerHTML = '<p style="color: #dc3545; font-size: 12px;">Error loading folder options. Please enter path manually.</p>';
+    }
+}
+
+/**
+ * Select a folder from the relocate options
+ */
+function selectRelocateFolder(path) {
+    document.getElementById('relocate-folder-input').value = path;
+}
+
+/**
+ * Confirm and save the relocated folder path
+ */
+async function confirmRelocateFolder() {
+    const itemId = state.selectedItemId;
+    if (!itemId) return;
+    
+    const newPath = document.getElementById('relocate-folder-input').value.trim();
+    
+    if (!newPath) {
+        alert('Please enter or select a folder path.');
+        return;
+    }
+    
+    try {
+        const result = await api(`/item/${itemId}/relocate-folder`, {
+            method: 'POST',
+            body: JSON.stringify({ folder_path: newPath })
+        });
+        
+        if (result.success) {
+            showToast('Folder path updated successfully', 'success');
+            
+            // Update the display
+            document.getElementById('detail-folder').value = newPath;
+            hide('folder-warning-banner');
+            hide('btn-relocate-folder');
+            hide('relocate-folder-panel');
+            
+            // Refresh the item to update file list
+            await loadItem(itemId);
+        } else {
+            alert(result.error || 'Failed to update folder path');
+        }
+    } catch (e) {
+        console.error('Error relocating folder:', e);
+        alert(`Error: ${e.message}`);
+    }
+}
+
+/**
+ * Cancel folder relocation
+ */
+function cancelRelocateFolder() {
+    hide('relocate-folder-panel');
+}
+
+/**
+ * Try to auto-reconcile folder for current item
+ */
+async function tryReconcileFolder() {
+    const itemId = state.selectedItemId;
+    if (!itemId) return;
+    
+    try {
+        const result = await api(`/item/${itemId}/reconcile-folder`, {
+            method: 'POST'
+        });
+        
+        if (result.success && result.reconciled) {
+            showToast('Folder found and updated!', 'success');
+            await loadItem(itemId);
+        } else if (result.success) {
+            showToast('Folder already exists', 'info');
+        } else {
+            showToast(result.error || 'Could not find matching folder', 'warning');
+            showRelocateFolderPanel();
+        }
+    } catch (e) {
+        console.error('Error reconciling folder:', e);
     }
 }
 
@@ -2501,9 +2861,10 @@ function closeUsersModal() {
 
 function renderUsersList() {
     const list = document.getElementById('users-list');
+    const currentUserId = state.user?.id;
     
     list.innerHTML = state.users.map(user => `
-        <div class="user-row">
+        <div class="user-row" data-user-id="${user.id}">
             <div class="user-avatar">
                 <span>${getInitials(user.display_name)}</span>
             </div>
@@ -2512,8 +2873,44 @@ function renderUsersList() {
                 <div class="user-info-email">${escapeHtml(user.email)}</div>
             </div>
             <span class="user-role">${user.role}</span>
+            ${state.user?.role === 'admin' && user.id !== currentUserId ? `
+                <button class="btn btn-danger btn-small btn-delete-user" data-user-id="${user.id}" title="Remove from team">
+                    &times;
+                </button>
+            ` : ''}
         </div>
     `).join('');
+    
+    // Add delete handlers
+    list.querySelectorAll('.btn-delete-user').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const userId = parseInt(btn.dataset.userId);
+            const user = state.users.find(u => u.id === userId);
+            if (user && confirm(`Remove ${user.display_name} from the team?`)) {
+                await deleteUser(userId);
+            }
+        });
+    });
+}
+
+async function deleteUser(userId) {
+    try {
+        const result = await api(`/users/${userId}`, { method: 'DELETE' });
+        if (result.success) {
+            showNotification('Team member removed', 'success');
+            // Remove from local state immediately for instant feedback
+            state.users = state.users.filter(u => u.id !== userId);
+            renderUsersList();
+            // Also refresh from server to ensure consistency
+            await loadUsers();
+            renderUsersList();
+        } else {
+            showNotification(result.error || 'Failed to remove team member', 'error');
+        }
+    } catch (e) {
+        showNotification(e.message || 'Failed to remove team member', 'error');
+    }
 }
 
 // =============================================================================
@@ -2719,6 +3116,29 @@ function closeSettingsModal() {
     hide('settings-modal');
 }
 
+async function exportSubmittalsToExcel() {
+    const resultEl = document.getElementById('export-result');
+    resultEl.textContent = 'Exporting...';
+    resultEl.style.color = '#666';
+    
+    try {
+        const result = await api('/admin/export-submittals-excel', {
+            method: 'POST'
+        });
+        
+        if (result.success) {
+            resultEl.textContent = `✅ ${result.message}`;
+            resultEl.style.color = '#198754';
+        } else {
+            resultEl.textContent = `❌ ${result.error}`;
+            resultEl.style.color = '#dc3545';
+        }
+    } catch (e) {
+        resultEl.textContent = `❌ Failed: ${e.message}`;
+        resultEl.style.color = '#dc3545';
+    }
+}
+
 async function handleSaveSettings(e) {
     e.preventDefault();
     
@@ -2809,6 +3229,18 @@ document.addEventListener('DOMContentLoaded', function() {
     // Login form
     document.getElementById('login-form').addEventListener('submit', handleLogin);
     
+    // Project selector
+    const projectSelector = document.getElementById('project-selector');
+    if (projectSelector) {
+        projectSelector.addEventListener('change', handleProjectChange);
+    }
+    
+    // Add project button
+    const addProjectBtn = document.getElementById('btn-add-project');
+    if (addProjectBtn) {
+        addProjectBtn.addEventListener('click', openAddProjectModal);
+    }
+    
     // Navigation tabs - handle both bucket tabs and inbox/workflow tabs
     document.querySelectorAll('.nav-tab').forEach(tab => {
         tab.addEventListener('click', () => {
@@ -2880,6 +3312,11 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-open-folder').addEventListener('click', openFolder);
     document.getElementById('btn-open-email').addEventListener('click', openOriginalEmail);
     
+    // Folder relocation buttons
+    document.getElementById('btn-relocate-folder').addEventListener('click', showRelocateFolderPanel);
+    document.getElementById('btn-confirm-relocate').addEventListener('click', confirmRelocateFolder);
+    document.getElementById('btn-cancel-relocate').addEventListener('click', cancelRelocateFolder);
+    
     // QCR dropdown change handler
     document.getElementById('detail-qcr').addEventListener('change', () => {
         validateReviewers();
@@ -2918,6 +3355,22 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('btn-settings').addEventListener('click', openSettingsModal);
     document.getElementById('btn-close-settings').addEventListener('click', closeSettingsModal);
     document.getElementById('settings-form').addEventListener('submit', handleSaveSettings);
+    
+    // Project modal
+    const closeProjectBtn = document.getElementById('btn-close-project');
+    if (closeProjectBtn) {
+        closeProjectBtn.addEventListener('click', closeProjectModal);
+    }
+    const newProjectForm = document.getElementById('new-project-form');
+    if (newProjectForm) {
+        newProjectForm.addEventListener('submit', handleNewProject);
+    }
+    
+    // Admin tools
+    const exportSubmittalsBtn = document.getElementById('btn-export-submittals-excel');
+    if (exportSubmittalsBtn) {
+        exportSubmittalsBtn.addEventListener('click', exportSubmittalsToExcel);
+    }
     
     // Reminder buttons
     const processRemindersBtn = document.getElementById('btn-process-reminders');
@@ -2962,6 +3415,7 @@ document.addEventListener('DOMContentLoaded', function() {
             closeAccModal();
             closeUsersModal();
             closeSettingsModal();
+            closeProjectModal();
             hide('user-dropdown');
         }
     });

@@ -360,6 +360,8 @@
             qcr_name: "{{QCR_NAME}}",
             qcr_email: "{{QCR_EMAIL}}",
             folder_path: "{{FOLDER_PATH}}",
+            responses_folder: "{{RESPONSES_FOLDER}}",
+            reopen_count: {{REOPEN_COUNT}},
             reviewer_count: {{REVIEWER_COUNT}},
             reviewers: {{REVIEWERS_JSON}},
             is_rfi: {{IS_RFI}}
@@ -438,7 +440,8 @@
                 token: ITEM_CONFIG.token,
                 qcr_name: ITEM_CONFIG.qcr_name,
                 qcr_action: selectedAction,
-                qcr_internal_notes: internalNotes
+                qcr_internal_notes: internalNotes,
+                reopen_count: ITEM_CONFIG.reopen_count
             };
             
             if (selectedAction === "Complete") {
@@ -475,8 +478,8 @@
             
             var jsonString = JSON.stringify(response, null, 2);
             
-            // Save to Responses folder
-            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            // Save to the correct Responses folder (may be versioned like "Responses R2" for reopened items)
+            var responsesFolder = ITEM_CONFIG.responses_folder;
             var filePath = responsesFolder + "\\_multi_reviewer_qcr_response.json";
             
             try {

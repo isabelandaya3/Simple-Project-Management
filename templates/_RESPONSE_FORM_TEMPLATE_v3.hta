@@ -317,6 +317,8 @@
             reviewer_name: "{{REVIEWER_NAME}}",
             reviewer_email: "{{REVIEWER_EMAIL}}",
             folder_path: "{{FOLDER_PATH}}",
+            responses_folder: "{{RESPONSES_FOLDER}}",
+            reopen_count: {{REOPEN_COUNT}},
             is_rfi: {{IS_RFI}}
         };
         
@@ -415,14 +417,14 @@
                 response_category: category,
                 selected_files: checkedFiles,
                 notes: notes,
-                internal_notes: internalNotes
+                internal_notes: internalNotes,
+                reopen_count: ITEM_CONFIG.reopen_count
             };
             
             var jsonString = JSON.stringify(response, null, 2);
             
-            // Save to Responses folder (same folder as this HTA file)
-            // Get the folder from ITEM_CONFIG since document.location may not preserve UNC paths
-            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            // Save to the correct Responses folder (may be versioned like "Responses R2" for reopened items)
+            var responsesFolder = ITEM_CONFIG.responses_folder;
             var filePath = responsesFolder + "\\_reviewer_response.json";
             
             try {

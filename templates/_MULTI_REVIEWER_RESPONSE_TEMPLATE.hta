@@ -238,6 +238,8 @@
             reviewer_name: "{{REVIEWER_NAME}}",
             reviewer_email: "{{REVIEWER_EMAIL}}",
             folder_path: "{{FOLDER_PATH}}",
+            responses_folder: "{{RESPONSES_FOLDER}}",
+            reopen_count: {{REOPEN_COUNT}},
             is_rfi: {{IS_RFI}}
         };
         
@@ -275,13 +277,14 @@
                 reviewer_name: ITEM_CONFIG.reviewer_name,
                 reviewer_email: ITEM_CONFIG.reviewer_email,
                 response_category: category,
-                internal_notes: internalNotes
+                internal_notes: internalNotes,
+                reopen_count: ITEM_CONFIG.reopen_count
             };
             
             var jsonString = JSON.stringify(response, null, 2);
             
-            // Save to Responses folder
-            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            // Save to the correct Responses folder (may be versioned like "Responses R2" for reopened items)
+            var responsesFolder = ITEM_CONFIG.responses_folder;
             
             // Use reviewer name in filename to avoid conflicts
             var safeName = ITEM_CONFIG.reviewer_name.replace(/[^a-zA-Z0-9]/g, "_");

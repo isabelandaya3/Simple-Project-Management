@@ -433,6 +433,8 @@
             reviewer_response_category: "{{REVIEWER_RESPONSE_CATEGORY}}",
             response_version: {{RESPONSE_VERSION}},
             folder_path: "{{FOLDER_PATH}}",
+            responses_folder: "{{RESPONSES_FOLDER}}",
+            reopen_count: {{REOPEN_COUNT}},
             is_rfi: {{IS_RFI}}
         };
         
@@ -697,13 +699,14 @@
                 response_text: finalResponseText,
                 selected_files: selectedFiles,
                 qcr_notes: action === "Send Back" ? internalNotes : finalResponseText,
-                qcr_internal_notes: internalNotes
+                qcr_internal_notes: internalNotes,
+                reopen_count: ITEM_CONFIG.reopen_count
             };
             
             var jsonString = JSON.stringify(response, null, 2);
             
-            // Save to Responses folder using folder path from config
-            var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
+            // Save to the correct Responses folder (may be versioned like "Responses R2" for reopened items)
+            var responsesFolder = ITEM_CONFIG.responses_folder;
             var filePath = responsesFolder + "\\_qcr_response.json";
             
             try {

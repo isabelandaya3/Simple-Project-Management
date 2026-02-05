@@ -419,6 +419,61 @@ a:hover {
     margin-bottom: 0.75rem;
 }
 
+/* Project Selector Dropdown */
+.project-selector {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.project-dropdown {
+    flex: 1;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--border-radius);
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2rem;
+}
+
+.project-dropdown:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.project-dropdown option {
+    padding: 0.5rem;
+}
+
+.btn-icon-only.btn-small {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    font-weight: 600;
+    border-radius: var(--border-radius);
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    cursor: pointer;
+}
+
+.btn-icon-only.btn-small:hover {
+    background: var(--accent-hover);
+}
+
 .project-card {
     background: var(--bg-primary);
     border-radius: var(--border-radius);
@@ -550,6 +605,29 @@ a:hover {
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
+}
+
+/* Toast animations */
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+@keyframes slideOut {
+    from {
+        transform: translateX(0);
+        opacity: 1;
+    }
+    to {
+        transform: translateX(100%);
+        opacity: 0;
+    }
 }
 
 /* =============================================================================
@@ -984,6 +1062,30 @@ a:hover {
     border-bottom: 1px solid var(--border-color);
 }
 
+.drawer-section textarea {
+    width: 100%;
+    padding: 0.625rem 0.875rem;
+    font-size: 0.9375rem;
+    font-family: inherit;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    transition: border-color var(--transition), box-shadow var(--transition);
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+.drawer-section textarea:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
+.drawer-section textarea::placeholder {
+    color: var(--text-muted);
+}
+
 .drawer-section:last-child {
     border-bottom: none;
     margin-bottom: 0;
@@ -1217,6 +1319,24 @@ a:hover {
     background: var(--bg-primary);
     border-radius: 10px;
     color: var(--text-secondary);
+}
+
+.user-row .btn-delete-user {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 1rem;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.user-row:hover .btn-delete-user {
+    opacity: 1;
 }
 
 /* =============================================================================

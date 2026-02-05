@@ -59,7 +59,9 @@ except ImportError:
 
 # Optional: openpyxl for Excel file updates
 try:
-    from openpyxl import load_workbook
+    from openpyxl import load_workbook, Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
@@ -376,6 +378,168 @@ def update_rfi_tracker_excel(item, action='close'):
         return {'success': False, 'error': f'Failed to update Excel: {str(e)}'}
 
 
+# =============================================================================
+# SUBMITTAL TRACKER EXCEL UPDATE
+# =============================================================================
+
+def update_submittal_tracker_excel(item, reviewers=None, action='close'):
+    """
+    Update the Submittal Tracker Excel file when a Submittal is closed or reopened.
+    
+    Args:
+        item: Dictionary containing item data (must have type='Submittal')
+        reviewers: List of reviewer dictionaries for multi-reviewer items
+        action: 'close' to add/update entry, 'reopen' to mark as reopened
+    
+    Returns:
+        dict with 'success' and optional 'error' or 'message'
+    """
+    if not HAS_OPENPYXL:
+        return {'success': False, 'error': 'openpyxl not installed'}
+    
+    # Only process Submittals
+    if item.get('type') != 'Submittal':
+        return {'success': True, 'message': 'Not a Submittal, skipping Excel update'}
+    
+    excel_path = CONFIG.get('submittal_tracker_excel_path')
+    if not excel_path:
+        return {'success': False, 'error': 'Submittal tracker Excel path not configured'}
+    
+    excel_file = Path(excel_path)
+    
+    # Create the file if it doesn't exist
+    if not excel_file.exists():
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Submittal Log"
+            
+            # Create header row
+            headers = ['Submittal ID', 'Title', 'Date Received', 'Final Category', 
+                       'Final Response', 'Reviewer(s)', 'QCR', 'Notes', 'Closed Date']
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_num)
+                cell.value = header
+                cell.font = Font(bold=True)
+            
+            # Auto-size columns
+            for col_num, header in enumerate(headers, 1):
+                ws.column_dimensions[get_column_letter(col_num)].width = max(len(header) + 2, 15)
+            
+            wb.save(excel_path)
+            wb.close()
+            print(f"[Submittal Excel] Created new tracker file: {excel_path}")
+        except Exception as e:
+            return {'success': False, 'error': f'Failed to create Excel file: {str(e)}'}
+    
+    try:
+        # Extract submittal identifier
+        identifier = item.get('identifier', '')
+        
+        # Get data fields
+        title = item.get('title', '') or ''
+        date_received = item.get('date_received', '') or ''
+        final_category = item.get('final_response_category', '') or item.get('response_category', '') or ''
+        final_response = item.get('final_response_text', '') or item.get('response_text', '') or ''
+        qcr_name = item.get('qcr_name', '') or ''
+        notes = item.get('notes', '') or ''
+        closed_at = item.get('closed_at', '') or datetime.now().strftime('%Y-%m-%d')
+        folder_link = item.get('folder_link', '') or ''
+        
+        # Get reviewer names
+        reviewer_names = ''
+        if reviewers:
+            reviewer_names = ', '.join([r.get('reviewer_name', '') for r in reviewers if r.get('reviewer_name')])
+        elif item.get('initial_reviewer_name'):
+            reviewer_names = item['initial_reviewer_name']
+        
+        # Load the workbook
+        wb = load_workbook(excel_path)
+        ws = wb.active
+        
+        # Find headers (assumes row 1 is header)
+        header_row = 1
+        col_submittal_id = 1
+        col_title = 2
+        col_date_recv = 3
+        col_category = 4
+        col_response = 5
+        col_reviewers = 6
+        col_qcr = 7
+        col_notes = 8
+        col_closed_date = 9
+        col_folder_link = 10
+        
+        # Check if headers exist, if not, add them
+        if ws.cell(row=1, column=1).value is None:
+            headers = ['Submittal ID', 'Title', 'Date Received', 'Final Category', 
+                       'Final Response', 'Reviewer(s)', 'QCR', 'Notes', 'Closed Date', 'Folder Link']
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_num)
+                cell.value = header
+                cell.font = Font(bold=True)
+        
+        # Find existing row with this submittal, or find first empty row
+        existing_row = None
+        first_empty_row = None
+        
+        for row_num in range(2, ws.max_row + 2):
+            cell_value = ws.cell(row=row_num, column=col_submittal_id).value
+            if cell_value is not None and str(cell_value).strip():
+                if str(cell_value).strip() == identifier.strip():
+                    existing_row = row_num
+                    break
+            else:
+                if first_empty_row is None:
+                    first_empty_row = row_num
+        
+        if first_empty_row is None:
+            first_empty_row = ws.max_row + 1
+        
+        target_row = existing_row or first_empty_row
+        
+        print(f"[Submittal Excel] Writing to row {target_row} (existing: {existing_row}, first_empty: {first_empty_row})")
+        print(f"[Submittal Excel] Data - ID: {identifier}, Title: {title[:50] if title else 'None'}...")
+        
+        if action == 'close':
+            # Add or update the Submittal entry
+            ws.cell(row=target_row, column=col_submittal_id).value = identifier
+            ws.cell(row=target_row, column=col_title).value = title
+            ws.cell(row=target_row, column=col_date_recv).value = date_received
+            ws.cell(row=target_row, column=col_category).value = final_category
+            ws.cell(row=target_row, column=col_response).value = final_response
+            ws.cell(row=target_row, column=col_reviewers).value = reviewer_names
+            ws.cell(row=target_row, column=col_qcr).value = qcr_name
+            ws.cell(row=target_row, column=col_notes).value = notes
+            ws.cell(row=target_row, column=col_closed_date).value = closed_at[:10] if closed_at else ''
+            ws.cell(row=target_row, column=col_folder_link).value = folder_link
+            
+            action_msg = 'updated' if existing_row else 'added'
+            
+        elif action == 'reopen':
+            # Mark the entry as reopened (clear closed date, update category)
+            if existing_row:
+                ws.cell(row=target_row, column=col_category).value = 'Reopened'
+                ws.cell(row=target_row, column=col_closed_date).value = ''
+                action_msg = 'marked as reopened'
+            else:
+                action_msg = 'no existing entry to update'
+        
+        # Save the workbook
+        wb.save(excel_path)
+        wb.close()
+        
+        return {
+            'success': True, 
+            'message': f'Submittal {identifier} {action_msg} in Excel tracker (row {target_row})'
+        }
+        
+    except PermissionError:
+        return {'success': False, 'error': 'Excel file is open by another user. Please close it and try again.'}
+    except Exception as e:
+        return {'success': False, 'error': f'Failed to update Excel: {str(e)}'}
+
+
 def is_business_day(date):
     """Check if a date is a business day (Mon-Fri)."""
     return date.weekday() < 5  # 0=Monday, 4=Friday
@@ -656,7 +820,7 @@ def process_pending_emails():
                     # Create a notification about the failed email
                     create_notification(
                         'email_failed',
-                        f'⚠️ Email Failed: Item {item_id}',
+                        f'Email Failed: Item {item_id}',
                         f'Failed to send {email_type} email after {MAX_EMAIL_RETRIES} attempts. Please send manually.',
                         item_id=item_id
                     )
@@ -1993,6 +2157,43 @@ def init_db():
     conn = get_db()
     cursor = conn.cursor()
     
+    # ==========================================================================
+    # PROJECT TABLE - Multi-project support
+    # ==========================================================================
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            short_name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            base_folder_path TEXT,
+            rfi_tracker_excel_path TEXT,
+            submittal_tracker_excel_path TEXT,
+            outlook_folder TEXT,
+            user_names TEXT,
+            bucket_patterns TEXT,
+            settings TEXT,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER DEFAULT 1,
+            FOREIGN KEY (created_by) REFERENCES user(id)
+        )
+    ''')
+    
+    # Project-User membership table - who has access to which project and their role
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_user (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT DEFAULT 'member' CHECK(role IN ('admin', 'member')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+            UNIQUE(project_id, user_id)
+        )
+    ''')
+    
     # User table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user (
@@ -2001,7 +2202,9 @@ def init_db():
             password_hash TEXT,
             display_name TEXT,
             role TEXT DEFAULT 'user' CHECK(role IN ('admin', 'user')),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            current_project_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (current_project_id) REFERENCES project(id)
         )
     ''')
     
@@ -2009,6 +2212,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS item (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
             type TEXT NOT NULL CHECK(type IN ('RFI', 'Submittal')),
             bucket TEXT NOT NULL DEFAULT 'ALL',
             identifier TEXT NOT NULL,
@@ -2060,6 +2264,81 @@ def init_db():
             FOREIGN KEY (item_id) REFERENCES item(id)
         )
     ''')
+    
+    # ==========================================================================
+    # MIGRATIONS - Add columns for multi-project support
+    # ==========================================================================
+    
+    # Add project_id column to item table
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN project_id INTEGER REFERENCES project(id)')
+    except:
+        pass
+    
+    # Add current_project_id column to user table
+    try:
+        cursor.execute('ALTER TABLE user ADD COLUMN current_project_id INTEGER REFERENCES project(id)')
+    except:
+        pass
+    
+    # Create default LEB project if no projects exist
+    cursor.execute('SELECT COUNT(*) FROM project')
+    if cursor.fetchone()[0] == 0:
+        # Get settings from CONFIG
+        import json as json_module
+        user_names_json = json_module.dumps(CONFIG.get('user_names', []))
+        
+        # Default bucket patterns for LEB
+        bucket_patterns_json = json_module.dumps([
+            {"pattern": "LEB\\s*-\\s*Turner", "bucket": "ACC_TURNER"},
+            {"pattern": "LEB\\s*-\\s*Mortenson", "bucket": "ACC_MORTENSON"},
+            {"pattern": "LEB\\s*-\\s*Faith", "bucket": "ACC_FTI"},
+            {"pattern": "LEB\\s*-\\s*FTI", "bucket": "ACC_FTI"},
+            {"pattern": "LEB", "bucket": "ALL"}
+        ])
+        
+        # Settings from config.json
+        settings_json = json_module.dumps({
+            "due_date_settings": CONFIG.get('due_date_settings', {}),
+            "poll_interval_minutes": CONFIG.get('poll_interval_minutes', 5)
+        })
+        
+        cursor.execute('''
+            INSERT INTO project (name, short_name, description, base_folder_path, 
+                               rfi_tracker_excel_path, submittal_tracker_excel_path,
+                               outlook_folder, user_names, bucket_patterns, settings)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            'LEB – Local Tracker',
+            'LEB',
+            'Lawrence Berkeley National Laboratory Project',
+            CONFIG.get('base_folder_path', ''),
+            CONFIG.get('rfi_tracker_excel_path', ''),
+            CONFIG.get('submittal_tracker_excel_path', ''),
+            CONFIG.get('outlook_folder', 'Inbox'),
+            user_names_json,
+            bucket_patterns_json,
+            settings_json
+        ))
+        default_project_id = cursor.lastrowid
+        print(f"Created default project 'LEB' with ID {default_project_id}")
+        
+        # Associate all existing items with this project
+        cursor.execute('UPDATE item SET project_id = ? WHERE project_id IS NULL', (default_project_id,))
+        print(f"Associated all existing items with default LEB project")
+        
+        # Associate all existing users with this project as admin
+        cursor.execute('SELECT id FROM user')
+        users = cursor.fetchall()
+        for user in users:
+            try:
+                cursor.execute('''
+                    INSERT INTO project_user (project_id, user_id, role) VALUES (?, ?, 'admin')
+                ''', (default_project_id, user[0]))
+                cursor.execute('UPDATE user SET current_project_id = ? WHERE id = ?', (default_project_id, user[0]))
+            except:
+                pass
+        print(f"Associated all existing users with default LEB project as admins")
     
     # Migration: Add new columns to existing databases
     try:
@@ -2286,7 +2565,7 @@ def init_db():
             reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue', 'manual')),
             sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
-            UNIQUE(item_id, recipient_email, recipient_role, reminder_stage)
+            UNIQUE(item_id, recipient_email, recipient_role, reminder_stage, due_date)
         )
     ''')
     
@@ -2317,7 +2596,7 @@ def init_db():
                     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     item_reviewer_id INTEGER,
                     FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
-                    UNIQUE(item_id, recipient_email, recipient_role, reminder_stage)
+                    UNIQUE(item_id, recipient_email, recipient_role, reminder_stage, due_date)
                 )
             ''')
             cursor.execute('''
@@ -2329,6 +2608,39 @@ def init_db():
             print("Migrated reminder_log table to support 'manual' reminder stage")
     except Exception as e:
         print(f"Note: reminder_log migration skipped or failed: {e}")
+    
+    # Migration: Update reminder_log UNIQUE constraint to include due_date
+    # This allows reminders to be sent again if due date changes
+    try:
+        cursor.execute("SELECT sql FROM sqlite_master WHERE name = 'reminder_log'")
+        table_sql = cursor.fetchone()
+        if table_sql and 'due_date)' not in table_sql[0]:
+            # Need to migrate - add due_date to unique constraint
+            cursor.execute('ALTER TABLE reminder_log RENAME TO reminder_log_old_v2')
+            cursor.execute('''
+                CREATE TABLE reminder_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    reminder_type TEXT NOT NULL,
+                    recipient_email TEXT NOT NULL,
+                    recipient_role TEXT NOT NULL,
+                    due_date DATE NOT NULL,
+                    reminder_stage TEXT NOT NULL CHECK(reminder_stage IN ('due_today', 'overdue', 'manual')),
+                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    item_reviewer_id INTEGER,
+                    FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE,
+                    UNIQUE(item_id, recipient_email, recipient_role, reminder_stage, due_date)
+                )
+            ''')
+            cursor.execute('''
+                INSERT INTO reminder_log (id, item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, sent_at, item_reviewer_id)
+                SELECT id, item_id, reminder_type, recipient_email, recipient_role, due_date, reminder_stage, sent_at, item_reviewer_id
+                FROM reminder_log_old_v2
+            ''')
+            cursor.execute('DROP TABLE reminder_log_old_v2')
+            print("Migrated reminder_log table: added due_date to unique constraint")
+    except Exception as e:
+        print(f"Note: reminder_log due_date migration skipped or failed: {e}")
     
     # ==========================================================================
     # CONTRACTOR UPDATE TRACKING - for handling ACC updates during/after review
@@ -2393,6 +2705,99 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+# =============================================================================
+# PROJECT HELPERS
+# =============================================================================
+
+def get_project_by_subject(subject):
+    """Find the project that matches an email subject based on bucket patterns.
+    Returns project dict with parsed settings or None if no match."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM project WHERE is_active = 1')
+    projects = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    import json as json_module
+    
+    for project in projects:
+        # Parse bucket patterns
+        bucket_patterns = []
+        if project.get('bucket_patterns'):
+            try:
+                bucket_patterns = json_module.loads(project['bucket_patterns'])
+            except:
+                pass
+        
+        # Check if any pattern matches the subject
+        for bp in bucket_patterns:
+            pattern = bp.get('pattern', '')
+            if pattern and re.search(pattern, subject, re.IGNORECASE):
+                # Parse other JSON fields
+                if project.get('user_names'):
+                    try:
+                        project['user_names'] = json_module.loads(project['user_names'])
+                    except:
+                        project['user_names'] = []
+                if project.get('settings'):
+                    try:
+                        project['settings'] = json_module.loads(project['settings'])
+                    except:
+                        project['settings'] = {}
+                project['matched_bucket'] = bp.get('bucket', 'ALL')
+                return project
+    
+    # If no project matched, return the first active project (fallback)
+    if projects:
+        project = projects[0]
+        if project.get('user_names'):
+            try:
+                project['user_names'] = json_module.loads(project['user_names'])
+            except:
+                project['user_names'] = []
+        if project.get('bucket_patterns'):
+            try:
+                project['bucket_patterns'] = json_module.loads(project['bucket_patterns'])
+            except:
+                project['bucket_patterns'] = []
+        if project.get('settings'):
+            try:
+                project['settings'] = json_module.loads(project['settings'])
+            except:
+                project['settings'] = {}
+        return project
+    
+    return None
+
+def get_default_project():
+    """Get the default (first active) project."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM project WHERE is_active = 1 ORDER BY id LIMIT 1')
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        import json as json_module
+        project = dict(row)
+        if project.get('user_names'):
+            try:
+                project['user_names'] = json_module.loads(project['user_names'])
+            except:
+                project['user_names'] = []
+        if project.get('bucket_patterns'):
+            try:
+                project['bucket_patterns'] = json_module.loads(project['bucket_patterns'])
+            except:
+                project['bucket_patterns'] = []
+        if project.get('settings'):
+            try:
+                project['settings'] = json_module.loads(project['settings'])
+            except:
+                project['settings'] = {}
+        return project
+    return None
 
 # =============================================================================
 # NOTIFICATION HELPERS
@@ -2755,6 +3160,10 @@ def parse_submittal_approvers(body):
         r'(?:^|\n)\s*Assigned\s+To[:\s\t]+(.+?)(?=\n|$)',
         # "Reviewer    Name" (some submittals use this)
         r'(?:^|\n)\s*Reviewers?[:\s\t]+(.+?)(?=\n\s*(?:Due|Status|Co-reviewers|Watchers|$|\n\n))',
+        # "Ball in court    Name1 (Company1), Name2 (Company2)"
+        r'(?:^|\n)\s*Ball\s+in\s+court[:\s\t]+(.+?)(?=\n\s*(?:Due|Status|Pending|$|\n\n))',
+        # "Pending action from    Name1 (Company1), Name2 (Company2)"
+        r'(?:^|\n)\s*Pending\s+action\s+from[:\s\t]+(.+?)(?=\n|$)',
     ]
     
     for pattern in patterns:
@@ -2826,9 +3235,171 @@ def sanitize_folder_name(name):
     name = name.strip('- ')
     return name
 
-def create_item_folder(item_type, identifier, bucket, title=None):
-    """Create a folder for the item and return the path."""
+
+def extract_folder_identifier(folder_name):
+    """Extract the identifier prefix from a folder name (e.g., 'Submittal - 270' from 'Submittal - 270 - Some Title').
+    
+    Returns tuple of (type, number) or None if not matched.
+    """
+    # Match patterns like "Submittal - 270" or "RFI - 33" at the start of folder name
+    match = re.match(r'^(Submittal|RFI)\s*-\s*(\S+)', folder_name, re.IGNORECASE)
+    if match:
+        item_type = match.group(1).title()  # Normalize to 'Submittal' or 'RFI'
+        number = match.group(2).rstrip('-')  # Get the number/identifier part, remove trailing dash
+        return (item_type, number)
+    return None
+
+
+def find_folder_for_item(item_type, identifier, bucket):
+    """Try to find an existing folder that matches the item identifier.
+    
+    Searches in the expected location based on bucket and type,
+    looking for folders that start with the identifier pattern.
+    
+    Returns the folder path if found, None otherwise.
+    """
     base_path = Path(CONFIG['base_folder_path'])
+    
+    # Determine bucket folder
+    bucket_folder = bucket.replace('ACC_', '').title() if bucket else 'General'
+    if bucket == 'ALL':
+        bucket_folder = 'General'
+    
+    # Determine type folder
+    type_folder = 'Submittals' if item_type == 'Submittal' else 'RFIs'
+    
+    # Build search path
+    search_path = base_path / bucket_folder / type_folder
+    
+    if not search_path.exists():
+        return None
+    
+    # Extract the number from identifier (e.g., "270" from "Submittal #270" or "270" from "270")
+    clean_id = sanitize_folder_name(identifier)
+    folder_id = clean_id.replace(f'{item_type} #', '').replace(f'{item_type} ', '')
+    
+    # Search for folders starting with the expected pattern
+    search_pattern = f"{item_type} - {folder_id}"
+    
+    for folder in search_path.iterdir():
+        if folder.is_dir() and folder.name.startswith(search_pattern):
+            return str(folder)
+    
+    return None
+
+
+def reconcile_item_folder(item_id):
+    """Attempt to find and update the folder path for an item whose folder is missing.
+    
+    Returns dict with success status and message.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT id, type, identifier, bucket, folder_link FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return {'success': False, 'error': 'Item not found'}
+    
+    # Check if current folder exists
+    if item['folder_link'] and Path(item['folder_link']).exists():
+        conn.close()
+        return {'success': True, 'message': 'Folder already exists', 'folder_link': item['folder_link']}
+    
+    # Try to find the folder
+    found_path = find_folder_for_item(item['type'], item['identifier'], item['bucket'])
+    
+    if found_path:
+        # Update the database
+        cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (found_path, item_id))
+        conn.commit()
+        conn.close()
+        return {
+            'success': True, 
+            'message': 'Folder found and updated',
+            'folder_link': found_path,
+            'reconciled': True
+        }
+    
+    conn.close()
+    return {
+        'success': False,
+        'error': 'Could not find matching folder',
+        'expected_pattern': f"{item['type']} - {item['identifier']}"
+    }
+
+
+def reconcile_all_folders():
+    """Scan all items and attempt to reconcile any with missing/invalid folders.
+    
+    Returns summary of reconciliation results.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT id, type, identifier, bucket, folder_link FROM item')
+    items = cursor.fetchall()
+    conn.close()
+    
+    results = {
+        'total_items': len(items),
+        'valid_folders': 0,
+        'missing_folders': 0,
+        'reconciled': [],
+        'still_missing': [],
+        'no_folder_set': 0
+    }
+    
+    for item in items:
+        if not item['folder_link']:
+            results['no_folder_set'] += 1
+            continue
+            
+        if Path(item['folder_link']).exists():
+            results['valid_folders'] += 1
+            continue
+        
+        # Folder is set but doesn't exist - try to reconcile
+        results['missing_folders'] += 1
+        
+        found_path = find_folder_for_item(item['type'], item['identifier'], item['bucket'])
+        
+        if found_path:
+            # Update the database
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (found_path, item['id']))
+            conn.commit()
+            conn.close()
+            
+            results['reconciled'].append({
+                'id': item['id'],
+                'identifier': item['identifier'],
+                'old_path': item['folder_link'],
+                'new_path': found_path
+            })
+        else:
+            results['still_missing'].append({
+                'id': item['id'],
+                'identifier': item['identifier'],
+                'expected_path': item['folder_link']
+            })
+    
+    return results
+
+def create_item_folder(item_type, identifier, bucket, title=None, base_folder=None):
+    """Create a folder for the item and return the path.
+    
+    Args:
+        item_type: 'Submittal' or 'RFI'
+        identifier: The item identifier (e.g., 'Submittal #123')
+        bucket: The bucket name (e.g., 'ACC_Turner')
+        title: Optional item title for folder naming
+        base_folder: Optional project-specific base folder path. Falls back to CONFIG if not provided.
+    """
+    base_path = Path(base_folder) if base_folder else Path(CONFIG['base_folder_path'])
     
     # Create bucket subfolder
     bucket_folder = bucket.replace('ACC_', '').title()
@@ -2953,10 +3524,10 @@ def generate_reviewer_form_html(item_id):
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
     html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
-    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', format_date_for_email(item['date_received']))
     html = html.replace('{{REVIEWER_DUE_DATE}}', reviewer_due)
     html = html.replace('{{QCR_DUE_DATE}}', qcr_due)
-    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', format_date_for_email(item['due_date']))
     html = html.replace('{{REVIEWER_NAME}}', js_escape(item['reviewer_name']) or 'N/A')
     html = html.replace('{{REVIEWER_EMAIL}}', item['reviewer_email'] or '')
     html = html.replace('{{TOKEN}}', token)
@@ -2975,6 +3546,10 @@ def generate_reviewer_form_html(item_id):
         responses_folder = folder_path / f"Responses R{reopen_count + 1}"
     else:
         responses_folder = folder_path / "Responses"
+    
+    # Add responses folder path and reopen count to template
+    html = html.replace('{{RESPONSES_FOLDER}}', js_escape(str(responses_folder)))
+    html = html.replace('{{REOPEN_COUNT}}', str(reopen_count))
     
     # Create Responses subfolder if it doesn't exist
     try:
@@ -3096,9 +3671,9 @@ def generate_qcr_form_html(item_id):
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
     html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
-    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
-    html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
-    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', format_date_for_email(item['date_received']))
+    html = html.replace('{{QCR_DUE_DATE}}', format_date_for_email(item['qcr_due_date']))
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', format_date_for_email(item['due_date']))
     html = html.replace('{{PRIORITY}}', item['priority'] or 'Normal')
     html = html.replace('{{REVIEWER_NAME}}', js_escape(item['reviewer_name']) or 'N/A')
     html = html.replace('{{QCR_NAME}}', js_escape(item['qcr_name']) or 'N/A')
@@ -3125,6 +3700,10 @@ def generate_qcr_form_html(item_id):
         responses_folder = folder_path / f"Responses R{reopen_count + 1}"
     else:
         responses_folder = folder_path / "Responses"
+    
+    # Add responses folder path and reopen count to template
+    html = html.replace('{{RESPONSES_FOLDER}}', js_escape(str(responses_folder)))
+    html = html.replace('{{REOPEN_COUNT}}', str(reopen_count))
     
     # Create Responses subfolder if it doesn't exist
     try:
@@ -3160,11 +3739,13 @@ def process_reviewer_response_json(json_path):
         if not token:
             return {'success': False, 'error': 'Missing token'}
         
+        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        
         conn = get_db()
         cursor = conn.cursor()
         
         # Find item by token - check both item table and item_reviewers table
-        cursor.execute('SELECT id, reviewer_response_version FROM item WHERE email_token_reviewer = ?', (token,))
+        cursor.execute('SELECT id, reviewer_response_version, reopen_count FROM item WHERE email_token_reviewer = ?', (token,))
         item = cursor.fetchone()
         
         # Track if this came from item_reviewers table (for updating that record too)
@@ -3177,12 +3758,24 @@ def process_reviewer_response_json(json_path):
             if reviewer_row:
                 item_reviewer_id = reviewer_row['id']
                 # Get item details
-                cursor.execute('SELECT id, reviewer_response_version FROM item WHERE id = ?', (reviewer_row['item_id'],))
+                cursor.execute('SELECT id, reviewer_response_version, reopen_count FROM item WHERE id = ?', (reviewer_row['item_id'],))
                 item = cursor.fetchone()
         
         if not item:
             conn.close()
             return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        # Check if response is from an old iteration (skip stale responses)
+        item_reopen_count = item['reopen_count'] or 0
+        if response_reopen_count is not None and response_reopen_count < item_reopen_count:
+            conn.close()
+            # Rename to indicate it's from old iteration
+            try:
+                old_iter_path = json_path.parent / f"_old_iteration_{json_path.name}"
+                json_path.rename(old_iter_path)
+            except:
+                pass
+            return {'success': False, 'error': f'Response from old iteration (R{response_reopen_count + 1}), item is now on R{item_reopen_count + 1}'}
         
         item_id = item['id']
         current_version = item['reviewer_response_version'] or 0
@@ -3285,16 +3878,30 @@ def process_qcr_response_json(json_path):
         if not token:
             return {'success': False, 'error': 'Missing token'}
         
+        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        
         conn = get_db()
         cursor = conn.cursor()
         
         # Find item by token
-        cursor.execute('SELECT id FROM item WHERE email_token_qcr = ?', (token,))
+        cursor.execute('SELECT id, reopen_count FROM item WHERE email_token_qcr = ?', (token,))
         item = cursor.fetchone()
         
         if not item:
             conn.close()
             return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        # Check if response is from an old iteration (skip stale responses)
+        item_reopen_count = item['reopen_count'] or 0
+        if response_reopen_count is not None and response_reopen_count < item_reopen_count:
+            conn.close()
+            # Rename to indicate it's from old iteration
+            try:
+                old_iter_path = json_path.parent / f"_old_iteration_{json_path.name}"
+                json_path.rename(old_iter_path)
+            except:
+                pass
+            return {'success': False, 'error': f'Response from old iteration (R{response_reopen_count + 1}), item is now on R{item_reopen_count + 1}'}
         
         item_id = item['id']
         qc_action = data.get('qc_action')
@@ -3386,8 +3993,8 @@ def process_qcr_response_json(json_path):
             if qc_action == 'Approve' or qc_action == 'Modify':
                 create_notification(
                     'response_ready',
-                    f'✅ Response Ready: {item_info["type"]} {item_info["identifier"]}',
-                    f'QC review complete. The response for "{item_info["title"] or item_info["identifier"]}" is ready to be sent to the contractor. Final category: {final_category}',
+                    f'Response Ready: {item_info["title"] or item_info["identifier"]}',
+                    f'QC review complete for {item_info["type"]} {item_info["identifier"]}. Final category: {final_category}',
                     item_id=item_id,
                     action_url=f'/api/items/{item_id}/complete',
                     action_label='Mark Complete'
@@ -3415,8 +4022,8 @@ def process_qcr_response_json(json_path):
             elif qc_action == 'Send Back':
                 create_notification(
                     'sent_back',
-                    f'↩️ Sent Back: {item_info["type"]} {item_info["identifier"]}',
-                    f'The item "{item_info["title"] or item_info["identifier"]}" has been sent back to the reviewer for revisions.',
+                    f'Sent Back: {item_info["title"] or item_info["identifier"]}',
+                    f'{item_info["type"]} {item_info["identifier"]} has been sent back to the reviewer for revisions.',
                     item_id=item_id
                 )
                 
@@ -3453,6 +4060,7 @@ def process_multi_reviewer_response_json(json_path):
         response_category = data.get('response_category')
         internal_notes = data.get('internal_notes', '')
         reviewer_name = data.get('reviewer_name', '')
+        response_reopen_count = data.get('reopen_count', 0)  # From the form
         
         if not item_id or not token:
             return {'success': False, 'error': 'Missing item_id or token'}
@@ -3460,9 +4068,9 @@ def process_multi_reviewer_response_json(json_path):
         conn = get_db()
         cursor = conn.cursor()
         
-        # Find the reviewer by token
+        # Find the reviewer by token and get item's current reopen_count
         cursor.execute('''
-            SELECT ir.*, i.qcr_id, i.qcr_email_sent_at
+            SELECT ir.*, i.qcr_id, i.qcr_email_sent_at, i.reopen_count as item_reopen_count
             FROM item_reviewers ir
             JOIN item i ON ir.item_id = i.id
             WHERE ir.email_token = ?
@@ -3472,6 +4080,18 @@ def process_multi_reviewer_response_json(json_path):
         if not reviewer:
             conn.close()
             return {'success': False, 'error': 'Invalid token - reviewer not found'}
+        
+        # Check if response is from an old iteration (skip stale responses)
+        item_reopen_count = reviewer['item_reopen_count'] or 0
+        if response_reopen_count is not None and response_reopen_count < item_reopen_count:
+            conn.close()
+            # Rename to indicate it's from old iteration
+            try:
+                old_iter_path = json_path.parent / f"_old_iteration_{json_path.name}"
+                json_path.rename(old_iter_path)
+            except:
+                pass
+            return {'success': False, 'error': f'Response from old iteration (R{response_reopen_count + 1}), item is now on R{item_reopen_count + 1}'}
         
         # Check if this is a resubmission
         is_resubmission = reviewer['response_at'] is not None
@@ -3645,6 +4265,7 @@ def process_multi_reviewer_qcr_response_json(json_path):
         item_id = data.get('item_id')
         token = data.get('token')
         qcr_action = data.get('qcr_action')
+        response_reopen_count = data.get('reopen_count', 0)  # From the form
         
         if not item_id or not token:
             return {'success': False, 'error': 'Missing item_id or token'}
@@ -3659,6 +4280,18 @@ def process_multi_reviewer_qcr_response_json(json_path):
         if not item:
             conn.close()
             return {'success': False, 'error': 'Invalid token - item not found'}
+        
+        # Check if response is from an old iteration (skip stale responses)
+        item_reopen_count = item['reopen_count'] or 0
+        if response_reopen_count is not None and response_reopen_count < item_reopen_count:
+            conn.close()
+            # Rename to indicate it's from old iteration
+            try:
+                old_iter_path = json_path.parent / f"_old_iteration_{json_path.name}"
+                json_path.rename(old_iter_path)
+            except:
+                pass
+            return {'success': False, 'error': f'Response from old iteration (R{response_reopen_count + 1}), item is now on R{item_reopen_count + 1}'}
         
         if qcr_action == 'Complete':
             # Complete the response
@@ -3703,8 +4336,8 @@ def process_multi_reviewer_qcr_response_json(json_path):
             # Create notification
             create_notification(
                 'response_ready',
-                f'Response Ready: {item["type"]} {item["identifier"]}',
-                f'QC review complete. The response for "{item["title"] or item["identifier"]}" is ready to be sent.',
+                f'Response Ready: {item["title"] or item["identifier"]}',
+                f'QC review complete for {item["type"]} {item["identifier"]}. Ready to be sent.',
                 item_id=item_id
             )
             
@@ -4007,12 +4640,35 @@ def is_past_reminder_time_today():
     pst_now = get_pst_now()
     return pst_now.hour >= REMINDER_HOUR_PST
 
-def has_reminder_been_sent(item_id, recipient_email, recipient_role, reminder_stage, item_reviewer_id=None):
-    """Check if a specific reminder has already been sent."""
+def has_reminder_been_sent(item_id, recipient_email, recipient_role, reminder_stage, item_reviewer_id=None, due_date=None):
+    """Check if a specific reminder has already been sent.
+    
+    Args:
+        item_id: The item ID
+        recipient_email: The recipient's email
+        recipient_role: 'reviewer' or 'qcr'
+        reminder_stage: 'due_today' or 'overdue'
+        item_reviewer_id: For multi-reviewer mode, the specific reviewer record ID
+        due_date: The due date for this reminder. If provided, only considers 
+                  reminders sent for this specific due date (allows new reminders
+                  when due date changes).
+    """
     conn = get_db()
     cursor = conn.cursor()
     
-    if item_reviewer_id:
+    if due_date and item_reviewer_id:
+        cursor.execute('''
+            SELECT id FROM reminder_log 
+            WHERE item_id = ? AND recipient_email = ? AND recipient_role = ? AND reminder_stage = ? 
+            AND item_reviewer_id = ? AND due_date = ?
+        ''', (item_id, recipient_email, recipient_role, reminder_stage, item_reviewer_id, due_date))
+    elif due_date:
+        cursor.execute('''
+            SELECT id FROM reminder_log 
+            WHERE item_id = ? AND recipient_email = ? AND recipient_role = ? AND reminder_stage = ?
+            AND due_date = ?
+        ''', (item_id, recipient_email, recipient_role, reminder_stage, due_date))
+    elif item_reviewer_id:
         cursor.execute('''
             SELECT id FROM reminder_log 
             WHERE item_id = ? AND recipient_email = ? AND recipient_role = ? AND reminder_stage = ? AND item_reviewer_id = ?
@@ -4330,7 +4986,8 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
     
     # Check if this reminder has already been sent
     recipient_email = item['reviewer_email'] if role == 'reviewer' else item['qcr_email']
-    if has_reminder_been_sent(item_id, recipient_email, role, reminder_stage):
+    due_date_str = due_date.strftime('%Y-%m-%d') if hasattr(due_date, 'strftime') else str(due_date)
+    if has_reminder_been_sent(item_id, recipient_email, role, reminder_stage, due_date=due_date_str):
         return {'success': True, 'skipped': True, 'reason': 'Already sent'}
     
     # Determine subject prefix
@@ -4409,7 +5066,7 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Project Folder</td><td style="border:1px solid #ddd;">{folder_link_html}</td></tr>
     </table>
 
@@ -4558,7 +5215,8 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
     item_id = item['id']
     
     # Check if this reminder has already been sent
-    if has_reminder_been_sent(item_id, reviewer['reviewer_email'], role, reminder_stage, reviewer['id']):
+    due_date_str = due_date.strftime('%Y-%m-%d') if hasattr(due_date, 'strftime') else str(due_date)
+    if has_reminder_been_sent(item_id, reviewer['reviewer_email'], role, reminder_stage, reviewer['id'], due_date=due_date_str):
         return {'success': True, 'skipped': True, 'reason': 'Already sent'}
     
     # Determine subject prefix
@@ -4690,7 +5348,8 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
     item_id = item['id']
     
     # Check if this reminder has already been sent
-    if has_reminder_been_sent(item_id, item['qcr_email'], 'qcr', reminder_stage):
+    due_date_str = due_date.strftime('%Y-%m-%d') if hasattr(due_date, 'strftime') else str(due_date)
+    if has_reminder_been_sent(item_id, item['qcr_email'], 'qcr', reminder_stage, due_date=due_date_str):
         return {'success': True, 'skipped': True, 'reason': 'Already sent'}
     
     # Determine subject prefix
@@ -4757,7 +5416,7 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td></tr>
     </table>
 
     <p style="margin-top:20px; font-size:12px; color:#777;">
@@ -5040,9 +5699,30 @@ class EmailPoller:
                     body = getattr(message, 'Body', '') or ''
                     received_time = getattr(message, 'ReceivedTime', None)
                     
-                    # Check if this is a relevant email
-                    if 'LEB' not in subject.upper():
+                    # Skip internal activity notifications - these are NOT new items
+                    # They are notifications when reviewers add responses, items are forwarded, etc.
+                    if re.search(
+                        r'review response was (edited|added|created|updated)|'
+                        r'was forwarded|was assigned|workflow step|status changed|'
+                        r'comment was added|comment was edited|'
+                        r'you were mentioned|attachment was added|'
+                        r'A new review response',
+                        subject,
+                        re.IGNORECASE
+                    ):
+                        # Log and skip - these don't need to create/update items
                         continue
+                    
+                    # Find the project this email belongs to
+                    project = get_project_by_subject(subject)
+                    if not project:
+                        # Fallback: check if matches old LEB pattern
+                        if 'LEB' not in subject.upper():
+                            continue
+                        project = get_default_project()
+                    
+                    # Get project ID for the item
+                    project_id = project.get('id') if project else None
                     
                     item_type = parse_item_type(subject)
                     if not item_type:
@@ -5054,9 +5734,10 @@ class EmailPoller:
                         continue
                     
                     # For RFIs, only process if user is listed as a Reviewer
+                    # Use project-specific user_names
                     rfi_question = None
                     if item_type == 'RFI':
-                        user_names = CONFIG.get('user_names', [])
+                        user_names = project.get('user_names', []) if project else CONFIG.get('user_names', [])
                         if user_names:
                             if not is_user_in_rfi_reviewers(body, user_names):
                                 print(f"  [RFI Skip] {identifier} - user not in Reviewers list")
@@ -5065,14 +5746,16 @@ class EmailPoller:
                         rfi_question = parse_rfi_question(body)
                     
                     # For Submittals, only process if user is listed as an Approver/Reviewer
+                    # Use project-specific user_names
                     if item_type == 'Submittal':
-                        user_names = CONFIG.get('user_names', [])
+                        user_names = project.get('user_names', []) if project else CONFIG.get('user_names', [])
                         if user_names:
                             if not is_user_in_submittal_approvers(body, user_names):
                                 print(f"  [Submittal Skip] {identifier} - user not in Approvers list")
                                 continue
                     
-                    bucket = determine_bucket(subject)
+                    # Determine bucket from project's matched bucket or default logic
+                    bucket = project.get('matched_bucket', 'ALL') if project else determine_bucket(subject)
                     title = parse_title(subject, identifier, body)
                     due_date = parse_due_date(body)
                     priority = parse_priority(body)
@@ -5160,7 +5843,8 @@ class EmailPoller:
                             
                             if not existing_revision:
                                 # Create new folder for the revision
-                                folder_link = create_item_folder(item_type, new_identifier, bucket, title)
+                                project_folder = project.get('base_folder_path') if project else None
+                                folder_link = create_item_folder(item_type, new_identifier, bucket, title, base_folder=project_folder)
                                 
                                 # Extract date_received from email received time
                                 if received_at:
@@ -5188,12 +5872,12 @@ class EmailPoller:
                                                     created_at, last_email_at, due_date, priority, folder_link,
                                                     date_received, initial_reviewer_due_date, qcr_due_date, 
                                                     is_contractor_window_insufficient, email_entry_id, rfi_question,
-                                                    initial_reviewer_id, qcr_id)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                    initial_reviewer_id, qcr_id, project_id)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 ''', (item_type, bucket, new_identifier, title, subject,
                                       received_at, received_at, due_date, priority, folder_link,
                                       date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id, rfi_question,
-                                      parent_initial_reviewer_id, parent_qcr_id))
+                                      parent_initial_reviewer_id, parent_qcr_id, project_id))
                                 new_item_id = cursor.lastrowid
                                 
                                 # Copy reviewers from parent item if it was multi-reviewer
@@ -5217,8 +5901,8 @@ class EmailPoller:
                                 # Create notification for new revision item
                                 create_notification(
                                     'new_item',
-                                    f'📋 New Revision: {new_identifier}',
-                                    f'Contractor submitted {new_identifier} (revision of {identifier}). Reviewers copied from original item.',
+                                    f'New Revision: {title or new_identifier}',
+                                    f'Contractor submitted {item_type} {new_identifier} (revision of {identifier}). Reviewers copied from original item.',
                                     item_id=new_item_id
                                 )
                                 
@@ -5337,7 +6021,7 @@ class EmailPoller:
                             
                             create_notification(
                                 'contractor_update',
-                                f'🔄 Contractor Update: {identifier}',
+                                f'Contractor Update: {title or identifier}',
                                 notification_msg,
                                 item_id=item_id,
                                 action_url=f'/api/item/{item_id}/review-update',
@@ -5365,8 +6049,9 @@ class EmailPoller:
                                 UPDATE item SET {', '.join(updates)} WHERE id = ?
                             ''', params)
                     else:
-                        # Create new item
-                        folder_link = create_item_folder(item_type, identifier, bucket, title)
+                        # Create new item - use project's base folder path
+                        project_folder = project.get('base_folder_path') if project else CONFIG.get('base_folder_path')
+                        folder_link = create_item_folder(item_type, identifier, bucket, title, base_folder=project_folder)
                         
                         # Extract date_received from email received time
                         if received_at:
@@ -5389,11 +6074,11 @@ class EmailPoller:
                             INSERT INTO item (type, bucket, identifier, title, source_subject, 
                                             created_at, last_email_at, due_date, priority, folder_link,
                                             date_received, initial_reviewer_due_date, qcr_due_date, 
-                                            is_contractor_window_insufficient, email_entry_id, rfi_question)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                            is_contractor_window_insufficient, email_entry_id, rfi_question, project_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (item_type, bucket, identifier, title, subject,
                               received_at, received_at, due_date, priority, folder_link,
-                              date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id, rfi_question))
+                              date_received, initial_reviewer_due, qcr_due, is_insufficient, message_id, rfi_question, project_id))
                         item_id = cursor.lastrowid
                         
                         if rfi_question:
@@ -5659,7 +6344,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
 
         <tr>
@@ -5679,7 +6364,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
 
         <tr>
@@ -5691,6 +6376,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
     </table>
 
     <!-- FILE PATH SECTION -->
@@ -5817,7 +6503,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
 
         <tr>
@@ -5837,7 +6523,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
 
         <tr>
@@ -5849,6 +6535,7 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
     </table>
 
     <!-- FILE PATH SECTION -->
@@ -7103,6 +7790,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'N/A'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
@@ -7261,6 +7949,7 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'N/A'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Due Date</td>
@@ -7689,7 +8378,7 @@ def send_reviewer_notification_email(item_id, qc_action, qcr_notes, final_catego
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Type:</td><td>{item['type']}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Identifier:</td><td>{item['identifier']}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
-<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Due Date:</td><td>{item['due_date'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Due Date:</td><td>{format_date_for_email(item['due_date'])}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Priority:</td><td>{item['priority'] or 'Normal'}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Response Version:</td><td>v{version}</td></tr>
 </table>
@@ -7899,7 +8588,7 @@ def send_qcr_completion_confirmation_email(item_id, qc_action, qcr_notes, final_
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Type:</td><td>{item['type']}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Identifier:</td><td>{item['identifier']}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Title:</td><td>{item['title'] or 'N/A'}</td></tr>
-<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Contractor Due Date:</td><td>{item['due_date'] or 'N/A'}</td></tr>
+<tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Contractor Due Date:</td><td>{format_date_for_email(item['due_date'])}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">Initial Reviewer:</td><td>{reviewer_names_display}</td></tr>
 <tr><td style="padding: 5px 15px 5px 0; font-weight: bold;">QC Reviewer:</td><td>{item['qcr_name'] or 'N/A'}</td></tr>
 </table>
@@ -8093,8 +8782,17 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
     html = html.replace('{{OTHER_REVIEWERS_SECTION}}', other_reviewers_html)
     
     # Save to Responses subfolder with reviewer-specific name
+    # Use versioned folder names for reopened items (Responses R2, Responses R3, etc.)
     folder_path = Path(item['folder_link'])
-    responses_folder = folder_path / "Responses"
+    reopen_count = item.get('reopen_count') or 0
+    if reopen_count > 0:
+        responses_folder = folder_path / f"Responses R{reopen_count + 1}"
+    else:
+        responses_folder = folder_path / "Responses"
+    
+    # Add responses folder path and reopen count to template
+    html = html.replace('{{RESPONSES_FOLDER}}', js_escape(str(responses_folder)))
+    html = html.replace('{{REOPEN_COUNT}}', str(reopen_count))
     
     # Create Responses subfolder if it doesn't exist
     try:
@@ -8353,7 +9051,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
@@ -8369,13 +9067,14 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
         {reviewer_row_html}
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
     </table>
 
     {folder_section_html}
@@ -8451,7 +9150,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
@@ -8467,13 +9166,14 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
         {reviewer_row_html}
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QC Reviewer</td>
             <td style="border:1px solid #ddd;">{item['qcr_name'] or 'Not assigned'}</td>
         </tr>
+        {f'<tr><td style="border:1px solid #ddd; font-weight:bold; vertical-align:top;">Admin Notes</td><td style="border:1px solid #ddd; background:#fffbeb;">{item["notes"].replace(chr(10), "<br>") if item.get("notes") else ""}</td></tr>' if item.get('notes') else ''}
     </table>
 
     {folder_section_html}
@@ -8564,7 +9264,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
@@ -8576,7 +9276,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
     </table>
     
@@ -8801,12 +9501,21 @@ def generate_multi_reviewer_qcr_form(item_id):
     except Exception as e:
         return {'success': False, 'error': f'Failed to create folder: {e}'}
     
-    # Create Responses folder
-    responses_folder = folder_path / "Responses"
+    # Create versioned Responses folder for reopened items
+    reopen_count = item.get('reopen_count') or 0
+    if reopen_count > 0:
+        responses_folder = folder_path / f"Responses R{reopen_count + 1}"
+    else:
+        responses_folder = folder_path / "Responses"
+    
     try:
         responses_folder.mkdir(exist_ok=True)
     except Exception as e:
         return {'success': False, 'error': f'Failed to create Responses folder: {e}'}
+    
+    # Add responses folder path and reopen count to template
+    html = html.replace('{{RESPONSES_FOLDER}}', js_escape(str(responses_folder)))
+    html = html.replace('{{REOPEN_COUNT}}', str(reopen_count))
     
     # Generate filename
     safe_name = "".join(c for c in (item['qcr_name'] or 'QCR') if c.isalnum() or c in (' ', '-', '_')).strip()
@@ -8994,7 +9703,7 @@ def send_multi_reviewer_qcr_email(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Date Received</td>
-            <td style="border:1px solid #ddd;">{item['date_received'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd;">{format_date_for_email(item['date_received'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Priority</td>
@@ -9002,15 +9711,15 @@ def send_multi_reviewer_qcr_email(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{item['initial_reviewer_due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{format_date_for_email(item['initial_reviewer_due_date'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{item['qcr_due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{format_date_for_email(item['qcr_due_date'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
-            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{item['due_date'] or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Reviewer(s)</td>
@@ -9588,6 +10297,44 @@ def api_create_user():
     conn.close()
     return jsonify({'id': user_id, 'email': email, 'display_name': display_name or email, 'role': role})
 
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def api_delete_user(user_id):
+    """Delete a user from the team (admin only)."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Check if user exists
+    cursor.execute('SELECT id, display_name FROM user WHERE id = ?', (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({'error': 'User not found'}), 404
+    
+    # Don't allow deleting yourself
+    current_user_id = session.get('user_id')
+    if user_id == current_user_id:
+        conn.close()
+        return jsonify({'error': 'Cannot delete yourself'}), 400
+    
+    # Remove user from items (set to NULL instead of deleting items)
+    cursor.execute('UPDATE item SET assigned_to_user_id = NULL WHERE assigned_to_user_id = ?', (user_id,))
+    cursor.execute('UPDATE item SET initial_reviewer_id = NULL WHERE initial_reviewer_id = ?', (user_id,))
+    cursor.execute('UPDATE item SET qcr_id = NULL WHERE qcr_id = ?', (user_id,))
+    
+    # Remove from item_reviewers
+    cursor.execute('DELETE FROM item_reviewers WHERE user_id = ?', (user_id,))
+    
+    # Remove from project_user membership
+    cursor.execute('DELETE FROM project_user WHERE user_id = ?', (user_id,))
+    
+    # Delete the user
+    cursor.execute('DELETE FROM user WHERE id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'message': f'User deleted successfully'})
+
 @app.route('/api/outlook/contacts', methods=['GET'])
 @login_required
 def api_search_outlook_contacts():
@@ -9727,6 +10474,12 @@ def api_get_items():
     conn = get_db()
     cursor = conn.cursor()
     
+    # Get current user's project
+    user_id = session.get('user_id')
+    cursor.execute('SELECT current_project_id FROM user WHERE id = ?', (user_id,))
+    user_row = cursor.fetchone()
+    current_project_id = user_row['current_project_id'] if user_row else None
+    
     query = '''
         SELECT i.*, 
                u.display_name as assigned_to_name,
@@ -9747,6 +10500,11 @@ def api_get_items():
         WHERE 1=1
     '''
     params = []
+    
+    # Filter by current project
+    if current_project_id:
+        query += ' AND (i.project_id = ? OR i.project_id IS NULL)'
+        params.append(current_project_id)
     
     if bucket and bucket != 'ALL':
         query += ' AND i.bucket = ?'
@@ -9776,29 +10534,89 @@ def api_get_items():
     cursor.execute(query, params)
     items = [dict(row) for row in cursor.fetchall()]
     
-    # Add review_due_soon flag for items where any reviewer due date is within 2 days
+    # Add review_due_soon flag and ball_in_court based on current workflow status
+    # Only check the due date for whoever currently needs to act
     today = datetime.now().date()
     two_days_from_now = today + timedelta(days=2)
     
+    # Get all pending reviewers for multi-reviewer items
+    multi_reviewer_items = [item['id'] for item in items if item.get('multi_reviewer_mode')]
+    pending_reviewers_map = {}
+    
+    if multi_reviewer_items:
+        placeholders = ','.join('?' * len(multi_reviewer_items))
+        cursor.execute(f'''
+            SELECT item_id, reviewer_name 
+            FROM item_reviewers 
+            WHERE item_id IN ({placeholders}) 
+              AND response_at IS NULL 
+              AND needs_response = 1
+            ORDER BY item_id, reviewer_name
+        ''', multi_reviewer_items)
+        for row in cursor.fetchall():
+            item_id = row['item_id']
+            if item_id not in pending_reviewers_map:
+                pending_reviewers_map[item_id] = []
+            pending_reviewers_map[item_id].append(row['reviewer_name'])
+    
     for item in items:
         review_due_soon = False
-        # Check initial reviewer due date
-        if item.get('initial_reviewer_due_date'):
-            try:
-                ir_due = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
-                if ir_due <= two_days_from_now and item.get('reviewer_response_status') != 'Complete':
-                    review_due_soon = True
-            except:
-                pass
-        # Check QCR due date
-        if item.get('qcr_due_date') and not review_due_soon:
-            try:
-                qcr_due = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
-                if qcr_due <= two_days_from_now and item.get('qcr_response_status') != 'Complete':
-                    review_due_soon = True
-            except:
-                pass
+        ball_in_court = '-'
+        status = item.get('status', '')
+        
+        # Determine ball in court based on status
+        if status == 'Unassigned':
+            ball_in_court = 'Admin'
+        elif status in ('Assigned', 'In Review'):
+            # Ball is with initial reviewer(s)
+            if item.get('multi_reviewer_mode') and item['id'] in pending_reviewers_map:
+                pending = pending_reviewers_map[item['id']]
+                if pending:
+                    # Show full names
+                    ball_in_court = ', '.join(pending)
+                else:
+                    ball_in_court = 'All Responded'
+            else:
+                reviewer_name = item.get('initial_reviewer_name', '')
+                if reviewer_name:
+                    # Show full name
+                    ball_in_court = reviewer_name
+                else:
+                    ball_in_court = 'Reviewer'
+            
+            # Check initial reviewer due date
+            if item.get('initial_reviewer_due_date'):
+                try:
+                    ir_due = datetime.strptime(item['initial_reviewer_due_date'], '%Y-%m-%d').date()
+                    if ir_due <= two_days_from_now:
+                        review_due_soon = True
+                except:
+                    pass
+        elif status == 'In QC':
+            # Ball is with QCR
+            qcr_name = item.get('qcr_name', '')
+            if qcr_name:
+                # Show full name
+                ball_in_court = qcr_name
+            else:
+                ball_in_court = 'QCR'
+            
+            # Check QCR due date
+            if item.get('qcr_due_date'):
+                try:
+                    qcr_due = datetime.strptime(item['qcr_due_date'], '%Y-%m-%d').date()
+                    if qcr_due <= two_days_from_now:
+                        review_due_soon = True
+                except:
+                    pass
+        elif status == 'Ready for Response':
+            ball_in_court = 'Admin'
+        elif status == 'Closed':
+            ball_in_court = 'Complete'
+        # For other statuses, no urgent highlight
+        
         item['review_due_soon'] = review_due_soon
+        item['ball_in_court'] = ball_in_court
     conn.close()
     
     return jsonify(items)
@@ -9840,6 +10658,25 @@ def api_get_item(item_id):
     item_dict['initial_reviewer_due_status'] = get_due_date_status(item_dict.get('initial_reviewer_due_date'))
     item_dict['qcr_due_status'] = get_due_date_status(item_dict.get('qcr_due_date'))
     item_dict['contractor_due_status'] = get_due_date_status(item_dict.get('due_date'))
+    
+    # Check folder validity and attempt auto-reconciliation if missing
+    if item_dict.get('folder_link'):
+        folder_path = Path(item_dict['folder_link'])
+        if not folder_path.exists():
+            item_dict['folder_missing'] = True
+            # Try auto-reconciliation
+            found_path = find_folder_for_item(item['type'], item['identifier'], item['bucket'])
+            if found_path:
+                # Auto-update the folder link
+                cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (found_path, item_id))
+                conn.commit()
+                item_dict['folder_link'] = found_path
+                item_dict['folder_missing'] = False
+                item_dict['folder_reconciled'] = True
+            else:
+                item_dict['folder_reconciled'] = False
+        else:
+            item_dict['folder_missing'] = False
     
     # If item has been reopened, get previous response history
     if item_dict.get('reopen_count', 0) > 0:
@@ -9978,21 +10815,36 @@ def api_create_item():
     if not identifier:
         return jsonify({'error': 'Identifier required'}), 400
     
-    # Create folder
-    title = data.get('title')
-    folder_link = create_item_folder(item_type, identifier, bucket, title)
-    
+    # Get user's current project for folder creation and item assignment
     conn = get_db()
     cursor = conn.cursor()
     
+    user_id = session.get('user_id')
+    project_id = None
+    project_folder = None
+    
+    if user_id:
+        cursor.execute('SELECT current_project_id FROM user WHERE id = ?', (user_id,))
+        user_row = cursor.fetchone()
+        if user_row and user_row['current_project_id']:
+            project_id = user_row['current_project_id']
+            cursor.execute('SELECT base_folder_path FROM project WHERE id = ?', (project_id,))
+            proj_row = cursor.fetchone()
+            if proj_row:
+                project_folder = proj_row['base_folder_path']
+    
+    # Create folder using project-specific base path
+    title = data.get('title')
+    folder_link = create_item_folder(item_type, identifier, bucket, title, base_folder=project_folder)
+    
     try:
         cursor.execute('''
-            INSERT INTO item (type, bucket, identifier, title, due_date, priority, status, folder_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO item (type, bucket, identifier, title, due_date, priority, status, folder_link, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             item_type, bucket, identifier,
             data.get('title'), data.get('due_date'), data.get('priority'),
-            data.get('status', 'Unassigned'), folder_link
+            data.get('status', 'Unassigned'), folder_link, project_id
         ))
         conn.commit()
         item_id = cursor.lastrowid
@@ -10265,7 +11117,10 @@ def api_close_item(item_id):
         conn.close()
         return jsonify({'error': 'Response category is required before closing'}), 400
     
-    if not response_text:
+    # Categories that don't require response text
+    categories_without_required_text = ['Approved', 'For Record Only']
+    
+    if not response_text and response_category not in categories_without_required_text:
         conn.close()
         return jsonify({'error': 'Response text is required before closing'}), 400
     
@@ -10277,6 +11132,28 @@ def api_close_item(item_id):
     
     cursor.execute('SELECT * FROM item WHERE id = ?', (item_id,))
     updated_item = dict(cursor.fetchone())
+    
+    # Get reviewer info for submittals
+    reviewers = None
+    if updated_item.get('type') == 'Submittal':
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, responded_at, response_category, response_text
+            FROM item_reviewers WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = [dict(row) for row in cursor.fetchall()]
+        # Also get names for display
+        cursor.execute('''
+            SELECT ir.display_name as initial_reviewer_name, qcr.display_name as qcr_name
+            FROM item i
+            LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+            LEFT JOIN user qcr ON i.qcr_id = qcr.id
+            WHERE i.id = ?
+        ''', (item_id,))
+        names_row = cursor.fetchone()
+        if names_row:
+            updated_item['initial_reviewer_name'] = names_row['initial_reviewer_name']
+            updated_item['qcr_name'] = names_row['qcr_name']
+    
     conn.close()
     
     # Update RFI Bulletin Tracker Excel if this is an RFI
@@ -10285,6 +11162,13 @@ def api_close_item(item_id):
         updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
     elif excel_result.get('error'):
         updated_item['excel_update_error'] = excel_result.get('error')
+    
+    # Update Submittal Tracker Excel if this is a Submittal
+    submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
+    if submittal_excel_result.get('success'):
+        updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
+    elif submittal_excel_result.get('error'):
+        updated_item['excel_update_error'] = submittal_excel_result.get('error')
     
     return jsonify(updated_item)
 
@@ -10322,6 +11206,13 @@ def api_reopen_item(item_id):
         updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
     elif excel_result.get('error'):
         updated_item['excel_update_error'] = excel_result.get('error')
+    
+    # Update Submittal Tracker Excel if this is a Submittal
+    submittal_excel_result = update_submittal_tracker_excel(updated_item, action='reopen')
+    if submittal_excel_result.get('success'):
+        updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
+    elif submittal_excel_result.get('error'):
+        updated_item['excel_update_error'] = submittal_excel_result.get('error')
     
     return jsonify(updated_item)
 
@@ -10749,6 +11640,328 @@ def api_update_due_date_settings():
         'settings': CONFIG['due_date_settings'],
         'recalculated_count': recalculated
     })
+
+# =============================================================================
+# API ROUTES - PROJECTS (Multi-Project Support)
+# =============================================================================
+
+@app.route('/api/projects', methods=['GET'])
+@login_required
+def api_get_projects():
+    """Get all projects the current user has access to."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    user_id = session.get('user_id')
+    is_admin = session.get('user_role') == 'admin'
+    
+    if is_admin:
+        # Admins can see all projects
+        cursor.execute('''
+            SELECT p.*, 
+                   (SELECT COUNT(*) FROM item WHERE project_id = p.id) as item_count,
+                   (SELECT role FROM project_user WHERE project_id = p.id AND user_id = ?) as user_role
+            FROM project p
+            WHERE p.is_active = 1
+            ORDER BY p.name
+        ''', (user_id,))
+    else:
+        # Regular users only see projects they're members of
+        cursor.execute('''
+            SELECT p.*, 
+                   (SELECT COUNT(*) FROM item WHERE project_id = p.id) as item_count,
+                   pu.role as user_role
+            FROM project p
+            JOIN project_user pu ON p.id = pu.project_id
+            WHERE pu.user_id = ? AND p.is_active = 1
+            ORDER BY p.name
+        ''', (user_id,))
+    
+    projects = [dict(row) for row in cursor.fetchall()]
+    
+    # Get the user's current project
+    cursor.execute('SELECT current_project_id FROM user WHERE id = ?', (user_id,))
+    user_row = cursor.fetchone()
+    current_project_id = user_row['current_project_id'] if user_row else None
+    
+    conn.close()
+    
+    return jsonify({
+        'projects': projects,
+        'current_project_id': current_project_id
+    })
+
+@app.route('/api/projects/current', methods=['GET'])
+@login_required
+def api_get_current_project():
+    """Get the current user's selected project details."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    user_id = session.get('user_id')
+    
+    cursor.execute('SELECT current_project_id FROM user WHERE id = ?', (user_id,))
+    user_row = cursor.fetchone()
+    current_project_id = user_row['current_project_id'] if user_row else None
+    
+    if not current_project_id:
+        # If no project selected, get the first available project
+        cursor.execute('''
+            SELECT p.id FROM project p
+            JOIN project_user pu ON p.id = pu.project_id
+            WHERE pu.user_id = ? AND p.is_active = 1
+            ORDER BY p.name LIMIT 1
+        ''', (user_id,))
+        row = cursor.fetchone()
+        if row:
+            current_project_id = row['id']
+            cursor.execute('UPDATE user SET current_project_id = ? WHERE id = ?', 
+                         (current_project_id, user_id))
+            conn.commit()
+    
+    if current_project_id:
+        cursor.execute('''
+            SELECT p.*, pu.role as user_role
+            FROM project p
+            LEFT JOIN project_user pu ON p.id = pu.project_id AND pu.user_id = ?
+            WHERE p.id = ?
+        ''', (user_id, current_project_id))
+        project = cursor.fetchone()
+        conn.close()
+        
+        if project:
+            project_dict = dict(project)
+            # Parse JSON fields
+            import json as json_module
+            if project_dict.get('user_names'):
+                try:
+                    project_dict['user_names'] = json_module.loads(project_dict['user_names'])
+                except:
+                    project_dict['user_names'] = []
+            if project_dict.get('bucket_patterns'):
+                try:
+                    project_dict['bucket_patterns'] = json_module.loads(project_dict['bucket_patterns'])
+                except:
+                    project_dict['bucket_patterns'] = []
+            if project_dict.get('settings'):
+                try:
+                    project_dict['settings'] = json_module.loads(project_dict['settings'])
+                except:
+                    project_dict['settings'] = {}
+            return jsonify(project_dict)
+    
+    conn.close()
+    return jsonify(None)
+
+@app.route('/api/projects/switch/<int:project_id>', methods=['POST'])
+@login_required
+def api_switch_project(project_id):
+    """Switch the current user's active project."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    user_id = session.get('user_id')
+    is_admin = session.get('user_role') == 'admin'
+    
+    # Check if user has access to this project
+    if is_admin:
+        cursor.execute('SELECT id FROM project WHERE id = ? AND is_active = 1', (project_id,))
+    else:
+        cursor.execute('''
+            SELECT p.id FROM project p
+            JOIN project_user pu ON p.id = pu.project_id
+            WHERE p.id = ? AND pu.user_id = ? AND p.is_active = 1
+        ''', (project_id, user_id))
+    
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Project not found or access denied'}), 404
+    
+    # Update user's current project
+    cursor.execute('UPDATE user SET current_project_id = ? WHERE id = ?', (project_id, user_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'project_id': project_id})
+
+@app.route('/api/projects', methods=['POST'])
+@admin_required
+def api_create_project():
+    """Create a new project."""
+    data = request.get_json()
+    
+    name = data.get('name')
+    short_name = data.get('short_name')
+    
+    if not name or not short_name:
+        return jsonify({'error': 'Name and short name are required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Check for duplicate short_name
+    cursor.execute('SELECT id FROM project WHERE short_name = ?', (short_name,))
+    if cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'A project with this short name already exists'}), 400
+    
+    import json as json_module
+    user_names_json = json_module.dumps(data.get('user_names', []))
+    bucket_patterns_json = json_module.dumps(data.get('bucket_patterns', []))
+    settings_json = json_module.dumps(data.get('settings', {}))
+    
+    user_id = session.get('user_id')
+    
+    cursor.execute('''
+        INSERT INTO project (name, short_name, description, base_folder_path, 
+                           rfi_tracker_excel_path, submittal_tracker_excel_path,
+                           outlook_folder, user_names, bucket_patterns, settings, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        name,
+        short_name,
+        data.get('description', ''),
+        data.get('base_folder_path', ''),
+        data.get('rfi_tracker_excel_path', ''),
+        data.get('submittal_tracker_excel_path', ''),
+        data.get('outlook_folder', 'Inbox'),
+        user_names_json,
+        bucket_patterns_json,
+        settings_json,
+        user_id
+    ))
+    
+    project_id = cursor.lastrowid
+    
+    # Make the creator an admin of this project
+    cursor.execute('''
+        INSERT INTO project_user (project_id, user_id, role) VALUES (?, ?, 'admin')
+    ''', (project_id, user_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'project_id': project_id})
+
+@app.route('/api/projects/<int:project_id>', methods=['PUT'])
+@admin_required
+def api_update_project(project_id):
+    """Update a project's settings."""
+    data = request.get_json()
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Check if project exists
+    cursor.execute('SELECT id FROM project WHERE id = ?', (project_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Project not found'}), 404
+    
+    import json as json_module
+    
+    updates = []
+    params = []
+    
+    if 'name' in data:
+        updates.append('name = ?')
+        params.append(data['name'])
+    if 'description' in data:
+        updates.append('description = ?')
+        params.append(data['description'])
+    if 'base_folder_path' in data:
+        updates.append('base_folder_path = ?')
+        params.append(data['base_folder_path'])
+    if 'rfi_tracker_excel_path' in data:
+        updates.append('rfi_tracker_excel_path = ?')
+        params.append(data['rfi_tracker_excel_path'])
+    if 'submittal_tracker_excel_path' in data:
+        updates.append('submittal_tracker_excel_path = ?')
+        params.append(data['submittal_tracker_excel_path'])
+    if 'outlook_folder' in data:
+        updates.append('outlook_folder = ?')
+        params.append(data['outlook_folder'])
+    if 'user_names' in data:
+        updates.append('user_names = ?')
+        params.append(json_module.dumps(data['user_names']))
+    if 'bucket_patterns' in data:
+        updates.append('bucket_patterns = ?')
+        params.append(json_module.dumps(data['bucket_patterns']))
+    if 'settings' in data:
+        updates.append('settings = ?')
+        params.append(json_module.dumps(data['settings']))
+    
+    if updates:
+        params.append(project_id)
+        cursor.execute(f'''
+            UPDATE project SET {', '.join(updates)} WHERE id = ?
+        ''', params)
+        conn.commit()
+    
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/projects/<int:project_id>/members', methods=['GET'])
+@admin_required
+def api_get_project_members(project_id):
+    """Get all members of a project."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT u.id, u.email, u.display_name, pu.role, pu.created_at
+        FROM user u
+        JOIN project_user pu ON u.id = pu.user_id
+        WHERE pu.project_id = ?
+        ORDER BY u.display_name
+    ''', (project_id,))
+    
+    members = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    return jsonify({'members': members})
+
+@app.route('/api/projects/<int:project_id>/members', methods=['POST'])
+@admin_required
+def api_add_project_member(project_id):
+    """Add a user to a project."""
+    data = request.get_json()
+    
+    user_id = data.get('user_id')
+    role = data.get('role', 'member')
+    
+    if not user_id:
+        return jsonify({'error': 'User ID is required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO project_user (project_id, user_id, role) VALUES (?, ?, ?)
+        ''', (project_id, user_id, role))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({'error': 'User is already a member of this project'}), 400
+
+@app.route('/api/projects/<int:project_id>/members/<int:user_id>', methods=['DELETE'])
+@admin_required
+def api_remove_project_member(project_id, user_id):
+    """Remove a user from a project."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        DELETE FROM project_user WHERE project_id = ? AND user_id = ?
+    ''', (project_id, user_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True})
 
 # =============================================================================
 # API ROUTES - AIRTABLE SYNC
@@ -11287,8 +12500,8 @@ def respond_qcr_submit():
         # Notification that response is ready to send to contractor
         create_notification(
             'response_ready',
-            f'✅ Response Ready: {item_info["type"]} {item_info["identifier"]}',
-            f'QC review complete. The response for "{item_info["title"] or item_info["identifier"]}" is ready to be sent to the contractor. Final category: {final_category}',
+            f'Response Ready: {item_info["title"] or item_info["identifier"]}',
+            f'QC review complete for {item_info["type"]} {item_info["identifier"]}. Final category: {final_category}',
             item_id=item_id,
             action_url=f'/api/items/{item_id}/complete',
             action_label='Mark Complete'
@@ -11306,8 +12519,8 @@ def respond_qcr_submit():
         # Notification that item was sent back
         create_notification(
             'sent_back',
-            f'↩️ Sent Back: {item_info["type"]} {item_info["identifier"]}',
-            f'The item "{item_info["title"] or item_info["identifier"]}" has been sent back to the reviewer for revisions.',
+            f'Sent Back: {item_info["title"] or item_info["identifier"]}',
+            f'{item_info["type"]} {item_info["identifier"]} has been sent back to the reviewer for revisions.',
             item_id=item_id
         )
     
@@ -12232,8 +13445,8 @@ def respond_multi_qcr_submit():
         # Create notification
         create_notification(
             'qc_complete',
-            f'QC Review Complete: {item["type"]} {item["identifier"]}',
-            f'Final response: {response_category}',
+            f'QC Complete: {item["title"] or item["identifier"]}',
+            f'{item["type"]} {item["identifier"]} final response: {response_category}',
             item_id
         )
         
@@ -12385,6 +13598,128 @@ def api_scan_folder_responses():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+# =============================================================================
+# FOLDER RECONCILIATION API
+# =============================================================================
+
+@app.route('/api/reconcile-folders', methods=['POST'])
+@admin_required
+def api_reconcile_all_folders():
+    """Scan all items and reconcile any missing/renamed folders."""
+    try:
+        results = reconcile_all_folders()
+        return jsonify({
+            'success': True,
+            'results': results
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/item/<int:item_id>/reconcile-folder', methods=['POST'])
+@login_required
+def api_reconcile_item_folder(item_id):
+    """Attempt to find and update the folder path for a single item."""
+    try:
+        result = reconcile_item_folder(item_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
+
+
+@app.route('/api/item/<int:item_id>/relocate-folder', methods=['POST'])
+@login_required
+def api_relocate_item_folder(item_id):
+    """Manually set a new folder path for an item."""
+    data = request.get_json()
+    new_path = data.get('folder_path', '').strip()
+    
+    if not new_path:
+        return jsonify({'success': False, 'error': 'No folder path provided'}), 400
+    
+    # Validate the path exists
+    if not Path(new_path).exists():
+        return jsonify({'success': False, 'error': 'Folder path does not exist'}), 400
+    
+    if not Path(new_path).is_dir():
+        return jsonify({'success': False, 'error': 'Path is not a directory'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT id, folder_link FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    
+    if not item:
+        conn.close()
+        return jsonify({'success': False, 'error': 'Item not found'}), 404
+    
+    old_path = item['folder_link']
+    cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (new_path, item_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': 'Folder path updated',
+        'old_path': old_path,
+        'new_path': new_path
+    })
+
+
+@app.route('/api/item/<int:item_id>/browse-folders', methods=['GET'])
+@login_required
+def api_browse_folders(item_id):
+    """Get list of potential matching folders for an item."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT id, type, identifier, bucket FROM item WHERE id = ?', (item_id,))
+    item = cursor.fetchone()
+    conn.close()
+    
+    if not item:
+        return jsonify({'success': False, 'error': 'Item not found'}), 404
+    
+    base_path = Path(CONFIG['base_folder_path'])
+    
+    # Determine search paths
+    bucket_folder = item['bucket'].replace('ACC_', '').title() if item['bucket'] else 'General'
+    if item['bucket'] == 'ALL':
+        bucket_folder = 'General'
+    type_folder = 'Submittals' if item['type'] == 'Submittal' else 'RFIs'
+    
+    # Get the identifier number for matching
+    clean_id = sanitize_folder_name(item['identifier'])
+    folder_id = clean_id.replace(f"{item['type']} #", '').replace(f"{item['type']} ", '')
+    
+    # Search for potential matches
+    search_path = base_path / bucket_folder / type_folder
+    potential_matches = []
+    
+    if search_path.exists():
+        # Look for folders that might match (contain the identifier number)
+        for folder in search_path.iterdir():
+            if folder.is_dir():
+                # Check if folder name contains the identifier
+                if folder_id in folder.name or item['type'] in folder.name:
+                    potential_matches.append({
+                        'path': str(folder),
+                        'name': folder.name,
+                        'exact_match': folder.name.startswith(f"{item['type']} - {folder_id}")
+                    })
+    
+    # Sort with exact matches first
+    potential_matches.sort(key=lambda x: (not x['exact_match'], x['name']))
+    
+    return jsonify({
+        'success': True,
+        'search_path': str(search_path),
+        'expected_prefix': f"{item['type']} - {folder_id}",
+        'folders': potential_matches[:20]  # Limit to 20 results
+    })
 
 
 @app.route('/api/watcher-status', methods=['GET'])
@@ -12607,6 +13942,100 @@ def api_send_item_reminder(item_id):
         'success': True,
         'results': results
     })
+
+
+@app.route('/api/admin/export-submittals-excel', methods=['POST'])
+@admin_required
+def api_export_submittals_excel():
+    """Export all closed submittals to Excel tracker."""
+    if not HAS_OPENPYXL:
+        return jsonify({'success': False, 'error': 'openpyxl not installed'}), 400
+    
+    excel_path = CONFIG.get('submittal_tracker_excel_path')
+    if not excel_path:
+        return jsonify({'success': False, 'error': 'Submittal tracker Excel path not configured'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all closed submittals with reviewer info
+    cursor.execute('''
+        SELECT i.*, 
+               CASE 
+                   WHEN EXISTS (SELECT 1 FROM item_reviewers WHERE item_id = i.id) THEN (
+                       SELECT GROUP_CONCAT(reviewer_name, ', ') 
+                       FROM item_reviewers 
+                       WHERE item_id = i.id
+                   )
+                   ELSE ir.display_name 
+               END as reviewer_names,
+               qcr.display_name as qcr_name
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.type = 'Submittal' AND i.closed_at IS NOT NULL
+        ORDER BY i.identifier
+    ''')
+    submittals = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    
+    if not submittals:
+        return jsonify({'success': False, 'error': 'No closed submittals found'}), 404
+    
+    # Create or clear the Excel file
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Submittal Log"
+        
+        # Create header row
+        headers = ['Submittal ID', 'Title', 'Date Received', 'Final Category', 
+                   'Final Response', 'Reviewer(s)', 'QCR', 'Notes', 'Closed Date', 'Folder Link']
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.value = header
+            cell.font = Font(bold=True)
+        
+        # Add data rows
+        for row_num, item in enumerate(submittals, 2):
+            final_category = item.get('final_response_category', '') or item.get('response_category', '') or ''
+            final_response = item.get('final_response_text', '') or item.get('response_text', '') or ''
+            closed_at = item.get('closed_at', '') or ''
+            
+            ws.cell(row=row_num, column=1).value = item.get('identifier', '')
+            ws.cell(row=row_num, column=2).value = item.get('title', '') or ''
+            ws.cell(row=row_num, column=3).value = item.get('date_received', '') or ''
+            ws.cell(row=row_num, column=4).value = final_category
+            ws.cell(row=row_num, column=5).value = final_response
+            ws.cell(row=row_num, column=6).value = item.get('reviewer_names', '') or ''
+            ws.cell(row=row_num, column=7).value = item.get('qcr_name', '') or ''
+            ws.cell(row=row_num, column=8).value = item.get('notes', '') or ''
+            ws.cell(row=row_num, column=9).value = closed_at[:10] if closed_at else ''
+            ws.cell(row=row_num, column=10).value = item.get('folder_link', '') or ''
+        
+        # Auto-size columns
+        for col_num in range(1, 11):
+            ws.column_dimensions[get_column_letter(col_num)].width = 20
+        
+        # Make response and folder link columns wider
+        ws.column_dimensions['E'].width = 50
+        ws.column_dimensions['J'].width = 60
+        
+        wb.save(excel_path)
+        wb.close()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Exported {len(submittals)} submittals to Excel',
+            'path': excel_path,
+            'count': len(submittals)
+        })
+        
+    except PermissionError:
+        return jsonify({'success': False, 'error': 'Excel file is open by another user. Please close it and try again.'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to export: {str(e)}'}), 500
+
 
 # =============================================================================
 # STATIC FILE ROUTES

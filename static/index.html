@@ -40,7 +40,7 @@
             <div class="sidebar-header">
                 <div class="app-logo">
                     <span class="logo-emoji">📋</span>
-                    <span class="logo-text">LEB Tracker</span>
+                    <span class="logo-text" id="app-title">Tracker</span>
                 </div>
                 <button class="btn-collapse-sidebar" id="btn-collapse-sidebar" title="Collapse Sidebar">◀</button>
             </div>
@@ -48,8 +48,16 @@
             <!-- Project Section -->
             <div class="sidebar-section">
                 <h3 class="sidebar-section-title">Project</h3>
-                <div class="project-card">
-                    <div class="project-name" id="project-name">LEB – Local Tracker</div>
+                <div class="project-selector">
+                    <select id="project-selector" class="project-dropdown">
+                        <option value="">Loading...</option>
+                    </select>
+                    <button class="btn btn-icon-only btn-small" id="btn-add-project" title="Add New Project" style="display:none;">
+                        <span>+</span>
+                    </button>
+                </div>
+                <div class="project-card" style="display:none;">
+                    <div class="project-name" id="project-name">Loading...</div>
                     <div class="project-subtitle">RFI & Submittal Management</div>
                 </div>
             </div>
@@ -183,7 +191,7 @@
                             </div>
                             <hr>
                             <button class="dropdown-item" id="btn-manage-users">
-                                <span>👥</span> Manage Users
+                                <span>👥</span> Project Team
                             </button>
                             <button class="dropdown-item" id="btn-settings">
                                 <span>⚙️</span> Settings
@@ -211,6 +219,7 @@
                             <th>Reviewer Due</th>
                             <th>QCR Due</th>
                             <th>Status</th>
+                            <th>Ball in Court</th>
                             <th>Initial Reviewer</th>
                             <th>QCR</th>
                         </tr>
@@ -507,11 +516,33 @@
                 <!-- Folder Link -->
                 <div class="drawer-section">
                     <label class="section-label">Files Folder</label>
+                    <!-- Folder Warning Banner (shown when folder is missing) -->
+                    <div id="folder-warning-banner" class="alert alert-warning hidden" style="margin-bottom: 10px; padding: 10px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px;">
+                        <span style="color: #856404;">⚠️ <strong>Folder not found.</strong> The folder may have been renamed or moved.</span>
+                    </div>
                     <div class="folder-link-group">
                         <input type="text" id="detail-folder" placeholder="Path to folder" readonly>
-                        <button class="btn btn-outline btn-sm" id="btn-open-folder">
+                        <button class="btn btn-outline btn-sm" id="btn-open-folder" title="Open folder in Explorer">
                             📂 Open
                         </button>
+                        <button class="btn btn-outline btn-sm hidden" id="btn-relocate-folder" title="Find or set new folder path" style="background: #fff3cd;">
+                            🔍 Relocate
+                        </button>
+                    </div>
+                    <!-- Relocate Folder Panel (hidden by default) -->
+                    <div id="relocate-folder-panel" class="hidden" style="margin-top: 10px; padding: 10px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px;">
+                        <p style="font-size: 12px; margin-bottom: 8px;"><strong>Potential matches found:</strong></p>
+                        <div id="relocate-folder-list" style="max-height: 150px; overflow-y: auto; margin-bottom: 10px;">
+                            <!-- Folder options will be populated here -->
+                        </div>
+                        <div style="margin-top: 8px;">
+                            <label style="font-size: 12px; display: block; margin-bottom: 4px;">Or enter path manually:</label>
+                            <div style="display: flex; gap: 5px;">
+                                <input type="text" id="relocate-folder-input" placeholder="Enter full folder path" style="flex: 1; font-size: 12px; padding: 5px;">
+                                <button class="btn btn-primary btn-sm" id="btn-confirm-relocate">Set Path</button>
+                            </div>
+                        </div>
+                        <button class="btn btn-outline btn-sm" id="btn-cancel-relocate" style="margin-top: 8px;">Cancel</button>
                     </div>
                 </div>
 
@@ -670,19 +701,19 @@
         </div>
     </div>
 
-    <!-- Manage Users Modal -->
+    <!-- Manage Project Team Modal -->
     <div class="modal-overlay hidden" id="users-modal">
         <div class="modal modal-lg">
             <div class="modal-header">
-                <h2>Manage Users</h2>
+                <h2>Project Team</h2>
                 <button class="btn-close" id="btn-close-users">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="users-list" id="users-list">
-                    <!-- Users will be loaded here -->
+                    <!-- Team members will be loaded here -->
                 </div>
                 <hr>
-                <h3>Add New User</h3>
+                <h3>Add Team Member</h3>
                 <form id="new-user-form">
                     <div class="form-row">
                         <div class="form-group">
@@ -792,7 +823,76 @@
                         </div>
                     </div>
                     
+                    <h3 style="margin-top: 25px; margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Admin Tools</h3>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button type="button" class="btn btn-outline" id="btn-export-submittals-excel">
+                            📊 Export Submittals to Excel
+                        </button>
+                    </div>
+                    <p id="export-result" style="margin-top: 10px; color: #666; font-size: 0.9em;"></p>
+                    
                     <button type="submit" class="btn btn-primary btn-full" style="margin-top: 20px;">Save Settings</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Project Modal -->
+    <div class="modal-overlay hidden" id="project-modal">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h2>Add New Project</h2>
+                <button class="btn-close" id="btn-close-project">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="new-project-form">
+                    <h3 style="margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Project Information</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="project-name-input">Project Name *</label>
+                            <input type="text" id="project-name-input" required placeholder="e.g., Berkeley Lab Extension">
+                        </div>
+                        <div class="form-group">
+                            <label for="project-short-name">Short Name *</label>
+                            <input type="text" id="project-short-name" required placeholder="e.g., LEB" maxlength="10">
+                            <small class="form-hint">Used in email subject patterns and UI. Max 10 chars.</small>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="project-description">Description</label>
+                        <textarea id="project-description" rows="2" placeholder="Brief project description..."></textarea>
+                    </div>
+                    
+                    <h3 style="margin-top: 25px; margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Folder & Outlook Settings</h3>
+                    <div class="form-group">
+                        <label for="project-base-folder">Base Folder Path *</label>
+                        <input type="text" id="project-base-folder" required placeholder="e.g., \\server\share\ProjectName">
+                        <small class="form-hint">Network path where RFI and Submittal folders will be created.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="project-outlook-folder">Outlook Folder</label>
+                        <input type="text" id="project-outlook-folder" placeholder="Inbox" value="Inbox">
+                        <small class="form-hint">Outlook folder to monitor for this project's emails.</small>
+                    </div>
+                    
+                    <h3 style="margin-top: 25px; margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">User Name Patterns (for email filtering)</h3>
+                    <div class="form-group">
+                        <label for="project-user-names">User Names</label>
+                        <textarea id="project-user-names" rows="3" placeholder="Isabel Andaya&#10;Andaya&#10;EoR - Structural"></textarea>
+                        <small class="form-hint">Enter one name per line. These patterns are used to detect if you're assigned as reviewer in ACC emails.</small>
+                    </div>
+                    
+                    <h3 style="margin-top: 25px; margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">Excel Tracker Paths (Optional)</h3>
+                    <div class="form-group">
+                        <label for="project-rfi-excel">RFI Tracker Excel Path</label>
+                        <input type="text" id="project-rfi-excel" placeholder="e.g., \\server\share\RFI Tracker.xlsx">
+                    </div>
+                    <div class="form-group">
+                        <label for="project-submittal-excel">Submittal Tracker Excel Path</label>
+                        <input type="text" id="project-submittal-excel" placeholder="e.g., \\server\share\Submittal Tracker.xlsx">
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary btn-full" style="margin-top: 20px;">Create Project</button>
                 </form>
             </div>
         </div>

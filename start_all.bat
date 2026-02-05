@@ -14,6 +14,11 @@ echo LEB RFI/Submittal Tracker
 echo ============================================
 echo.
 
+REM Wait for network to be ready (important for startup)
+REM This delay helps ensure network drives are mounted
+echo Waiting for system to initialize...
+timeout /t 15 /nobreak >nul
+
 REM Navigate to script directory
 cd /d "%~dp0"
 

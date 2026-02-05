@@ -292,7 +292,9 @@
             token: "{{TOKEN}}",
             reviewer_name: "{{REVIEWER_NAME}}",
             reviewer_email: "{{REVIEWER_EMAIL}}",
-            folder_path: "{{FOLDER_PATH}}"
+            folder_path: "{{FOLDER_PATH}}",
+            responses_folder: "{{RESPONSES_FOLDER}}",
+            reopen_count: {{REOPEN_COUNT}}
         };
 
         var fso = new ActiveXObject("Scripting.FileSystemObject");
@@ -376,17 +378,18 @@
                 reviewer_email: ITEM_CONFIG.reviewer_email,
                 response_text: notes,
                 internal_notes: internalNotes,
-                selected_files: selectedFiles
+                selected_files: selectedFiles,
+                reopen_count: ITEM_CONFIG.reopen_count
             };
             
-            // Save JSON file
+            // Save JSON file to the correct Responses folder (may be versioned like "Responses R2" for reopened items)
             var timestamp = new Date().toISOString().replace(/[:.]/g, '-');
             var jsonFileName = "_RESPONSE_" + timestamp + ".json";
-            var jsonPath = ITEM_CONFIG.folder_path + "\\Responses\\" + jsonFileName;
+            var responsesFolder = ITEM_CONFIG.responses_folder;
+            var jsonPath = responsesFolder + "\\" + jsonFileName;
             
             try {
                 // Create Responses folder if it doesn't exist
-                var responsesFolder = ITEM_CONFIG.folder_path + "\\Responses";
                 if (!fso.FolderExists(responsesFolder)) {
                     fso.CreateFolder(responsesFolder);
                 }
