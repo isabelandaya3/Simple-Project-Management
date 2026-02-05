@@ -9517,10 +9517,10 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{RESPONSES_FOLDER}}', js_escape(str(responses_folder)))
     html = html.replace('{{REOPEN_COUNT}}', str(reopen_count))
     
-    # Generate filename
+    # Generate filename - save to responses_folder, not main folder
     safe_name = "".join(c for c in (item['qcr_name'] or 'QCR') if c.isalnum() or c in (' ', '-', '_')).strip()
     file_name = f"_QCR_Review_Form_{safe_name}.hta"
-    file_path = folder_path / file_name
+    file_path = responses_folder / file_name
     
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
