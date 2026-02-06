@@ -838,7 +838,7 @@ async function populateDetailDrawer(item) {
     typeEl.className = `chip ${item.type === 'RFI' ? 'chip-rfi' : 'chip-submittal'}`;
     
     // Info fields
-    document.getElementById('detail-bucket').textContent = getBucketName(item.bucket);
+    document.getElementById('detail-bucket').value = item.bucket || 'ALL';
     document.getElementById('detail-identifier').textContent = item.identifier;
     document.getElementById('detail-date-received').textContent = formatDate(item.date_received) || '-';
     document.getElementById('detail-created').textContent = formatDateTime(item.created_at);
@@ -924,6 +924,14 @@ async function populateDetailDrawer(item) {
     } else {
         // Show manual response section when no QCR final response yet
         show(responseSection);
+    }
+    
+    // Hide response category for RFIs (only Submittals need categories like Approved, Revise and Resubmit, etc.)
+    const responseCategoryGroup = document.getElementById('detail-response-category').closest('.form-group');
+    if (item.type === 'RFI') {
+        responseCategoryGroup.classList.add('hidden');
+    } else {
+        responseCategoryGroup.classList.remove('hidden');
     }
     
     // Response fields - use final response values if available, otherwise fall back to item values
@@ -1097,6 +1105,7 @@ async function saveItem() {
         due_date: document.getElementById('detail-due-date').value || null,
         priority: document.getElementById('detail-priority').value || null,
         status: document.getElementById('detail-status').value,
+        bucket: document.getElementById('detail-bucket').value || 'ALL',
         qcr_id: qcrId || null,
         initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
         qcr_due_date: document.getElementById('detail-qcr-due').value || null,

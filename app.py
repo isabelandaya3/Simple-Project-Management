@@ -60,7 +60,7 @@ except ImportError:
 # Optional: openpyxl for Excel file updates
 try:
     from openpyxl import load_workbook, Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, Alignment
     from openpyxl.utils import get_column_letter
     HAS_OPENPYXL = True
 except ImportError:
@@ -338,18 +338,28 @@ def update_rfi_tracker_excel(item, action='close'):
         target_row = existing_row or first_empty_row
         
         print(f"[RFI Excel] Writing to row {target_row} (existing: {existing_row}, first_empty: {first_empty_row})")
-        print(f"[RFI Excel] Data - RFI ID: {rfi_id_display}, Title: {title[:50] if title else 'None'}...")
+        print(f"[RFI Excel] Data - RFI ID: {rfi_number}, Title: {title[:50] if title else 'None'}...")
+        
+        # Create wrap text alignment for cells with long content
+        wrap_alignment = Alignment(wrap_text=True, vertical='top')
         
         if action == 'close':
             # Add or update the RFI entry
             if col_rfi_id:
-                ws.cell(row=target_row, column=col_rfi_id).value = rfi_id_display
+                # Use just the number (e.g., "31" not "RFI #31") for the RFI ID column
+                ws.cell(row=target_row, column=col_rfi_id).value = rfi_number
             if col_title:
-                ws.cell(row=target_row, column=col_title).value = title
+                cell = ws.cell(row=target_row, column=col_title)
+                cell.value = title
+                cell.alignment = wrap_alignment
             if col_question:
-                ws.cell(row=target_row, column=col_question).value = question
+                cell = ws.cell(row=target_row, column=col_question)
+                cell.value = question
+                cell.alignment = wrap_alignment
             if col_response:
-                ws.cell(row=target_row, column=col_response).value = response
+                cell = ws.cell(row=target_row, column=col_response)
+                cell.value = response
+                cell.alignment = wrap_alignment
             if col_status:
                 ws.cell(row=target_row, column=col_status).value = 'Closed'
             
@@ -698,6 +708,23 @@ def get_due_date_status(due_date):
         return 'yellow'  # 1-3 days remaining
     else:
         return 'green'  # More than 3 days
+
+def get_contractor_name(bucket):
+    """Convert bucket code to contractor display name for emails.
+    
+    Args:
+        bucket: Bucket code like 'ACC_TURNER', 'ACC_MORTENSON', etc.
+    
+    Returns:
+        Human-readable contractor name
+    """
+    contractor_names = {
+        'ACC_TURNER': 'Turner',
+        'ACC_MORTENSON': 'Mortenson',
+        'ACC_FTI': 'FTI',
+        'ALL': 'General'
+    }
+    return contractor_names.get(bucket, bucket.replace('ACC_', '').title() if bucket else 'Unknown')
 
 # =============================================================================
 # FLASK APP SETUP
@@ -3389,6 +3416,74 @@ def reconcile_all_folders():
     
     return results
 
+def reorganize_folder_for_revision(folder_link, current_reopen_count):
+    """Reorganize folder structure when a Revise and Resubmit is detected.
+    
+    Creates R0 folder and moves existing PDFs there (if first revision),
+    then creates the new Rn folder for the revision.
+    
+    Args:
+        folder_link: Path to the item's folder
+        current_reopen_count: Current reopen count (0 = first revision creates R0 and R1)
+    
+    Returns:
+        dict with success status and any error message
+    """
+    if not folder_link:
+        return {'success': False, 'error': 'No folder link provided'}
+    
+    folder_path = Path(folder_link)
+    if not folder_path.exists():
+        return {'success': False, 'error': f'Folder does not exist: {folder_link}'}
+    
+    try:
+        # PDF extensions to move
+        pdf_extensions = {'.pdf', '.PDF'}
+        
+        # Calculate revision numbers
+        # current_reopen_count = 0 means this is the first revision (R0 -> R1)
+        # current_reopen_count = 1 means this is the second revision (R1 -> R2)
+        new_revision = current_reopen_count + 1
+        
+        # Check if R0 folder already exists
+        r0_folder = folder_path / "R0"
+        
+        if not r0_folder.exists():
+            # First time reorganizing - create R0 and move PDFs from root
+            r0_folder.mkdir(exist_ok=True)
+            print(f"  [Folder Reorg] Created R0 folder: {r0_folder}")
+            
+            # Move PDFs from root folder to R0 (excluding Responses folder contents)
+            pdfs_moved = 0
+            for item in folder_path.iterdir():
+                if item.is_file() and item.suffix in pdf_extensions:
+                    dest = r0_folder / item.name
+                    try:
+                        import shutil
+                        shutil.move(str(item), str(dest))
+                        pdfs_moved += 1
+                        print(f"  [Folder Reorg] Moved {item.name} to R0")
+                    except Exception as e:
+                        print(f"  [Folder Reorg] Error moving {item.name}: {e}")
+            
+            print(f"  [Folder Reorg] Moved {pdfs_moved} PDF(s) to R0")
+        
+        # Create the new revision folder (R1, R2, etc.)
+        new_revision_folder = folder_path / f"R{new_revision}"
+        new_revision_folder.mkdir(exist_ok=True)
+        print(f"  [Folder Reorg] Created R{new_revision} folder: {new_revision_folder}")
+        
+        return {
+            'success': True,
+            'r0_folder': str(r0_folder),
+            'new_revision_folder': str(new_revision_folder),
+            'new_revision': new_revision
+        }
+        
+    except Exception as e:
+        print(f"  [Folder Reorg] Error reorganizing folder: {e}")
+        return {'success': False, 'error': str(e)}
+
 def create_item_folder(item_type, identifier, bucket, title=None, base_folder=None):
     """Create a folder for the item and return the path.
     
@@ -5073,6 +5168,7 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
         <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
         <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor</td><td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
@@ -5174,6 +5270,7 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
         <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
         <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor</td><td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
@@ -5301,6 +5398,7 @@ def send_multi_reviewer_reminder_email(item, reviewer, role, due_date, reminder_
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
         <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
         <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor</td><td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
@@ -5424,6 +5522,7 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
     <table cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse; margin-top:10px;">
         <tr><td colspan="2" style="background:#f2f2f2; font-weight:bold; border:1px solid #ddd;">Item Information</td></tr>
         <tr><td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td><td style="border:1px solid #ddd;">{item['type']}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor</td><td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
@@ -6345,6 +6444,11 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         </tr>
 
         <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+
+        <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -6501,6 +6605,11 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
 
         <tr>
@@ -6783,6 +6892,10 @@ def send_due_date_update_email(item_id, recipient_type, new_due_date, admin_note
             <td style="border:1px solid #ddd;">{item['type']}</td>
         </tr>
         <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+        <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -7020,6 +7133,10 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
             <td style="border:1px solid #ddd;">{item['type']}</td>
         </tr>
         <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+        <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -7123,6 +7240,10 @@ def send_workflow_restart_email(item_id, admin_note='', was_closed=False, previo
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
@@ -7380,6 +7501,10 @@ def send_revision_item_emails(item_id, parent_response, admin_note=''):
             <td style="border:1px solid #ddd;">{item['type']}</td>
         </tr>
         <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+        <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -7478,6 +7603,10 @@ def send_revision_item_emails(item_id, parent_response, admin_note=''):
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
@@ -7774,6 +7903,11 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         </tr>
 
         <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+
+        <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -7930,6 +8064,11 @@ def send_qcr_assignment_email(item_id, is_revision=False, version=None):
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}
+        </tr>
+
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
 
         <tr>
@@ -9054,6 +9193,10 @@ def send_multi_reviewer_assignment_emails(item_id):
             <td style="border:1px solid #ddd;">{item['type']}</td>
         </tr>
         <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+        <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -9151,6 +9294,10 @@ def send_multi_reviewer_assignment_emails(item_id):
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
@@ -9265,6 +9412,10 @@ def send_multi_reviewer_assignment_emails(item_id):
         <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Type</td>
             <td style="border:1px solid #ddd;">{item['type']}</td>
+        </tr>
+        <tr>
+            <td style="border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Identifier</td>
@@ -9725,6 +9876,10 @@ def send_multi_reviewer_qcr_email(item_id):
             <td style="border:1px solid #ddd;">{item['type']}</td>
         </tr>
         <tr>
+            <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Contractor</td>
+            <td style="border:1px solid #ddd; font-weight:bold; color:#2c3e50;">{get_contractor_name(item.get('bucket'))}</td>
+        </tr>
+        <tr>
             <td style="width:160px; border:1px solid #ddd; font-weight:bold;">Identifier</td>
             <td style="border:1px solid #ddd;">{item['identifier']}</td>
         </tr>
@@ -9798,6 +9953,7 @@ def send_multi_reviewer_qcr_email(item_id):
             # The email body contains a link/button to access the form directly from the shared folder
             
             mail.Send()
+            print(f"  [QCR Email] Successfully sent to {item['qcr_email']} for {item['identifier']}")
             
             # Just update qcr_response_status (qcr_email_sent_at was already set atomically at start)
             cursor.execute('''
@@ -10750,7 +10906,7 @@ def api_update_item(item_id):
     # Fields that can be updated (removed initial_reviewer_id - use item_reviewers table instead)
     allowed_fields = [
         'title', 'due_date', 'priority', 'status', 'assigned_to_user_id', 'notes', 'folder_link',
-        'qcr_id', 'date_received',
+        'qcr_id', 'date_received', 'bucket',
         'initial_reviewer_due_date', 'qcr_due_date', 'rfi_question'
     ]
     updates = []
@@ -11144,7 +11300,8 @@ def api_close_item(item_id):
     response_category = item['response_category'] or item['final_response_category']
     response_text = item['response_text'] or item['final_response_text']
     
-    if not response_category:
+    # Response category is only required for Submittals, not RFIs
+    if item['type'] != 'RFI' and not response_category:
         conn.close()
         return jsonify({'error': 'Response category is required before closing'}), 400
     
@@ -12853,12 +13010,24 @@ def api_review_update(item_id):
         params = [now, admin_note, 'Assigned']
         
         # Clear closed_at if it was closed and increment reopen_count
+        current_reopen_count = item.get('reopen_count') or 0
         if item['closed_at']:
             updates.append('closed_at = NULL')
             # Increment reopen_count for versioned response folders
-            current_reopen_count = item.get('reopen_count') or 0
             updates.append('reopen_count = ?')
             params.append(current_reopen_count + 1)
+            
+            # Reorganize folder structure for revision (create R0, move PDFs, create Rn)
+            if item.get('folder_link'):
+                reorg_result = reorganize_folder_for_revision(item['folder_link'], current_reopen_count)
+                if reorg_result.get('success'):
+                    result['folder_reorganized'] = {
+                        'r0_folder': reorg_result.get('r0_folder'),
+                        'new_revision_folder': reorg_result.get('new_revision_folder'),
+                        'new_revision': reorg_result.get('new_revision')
+                    }
+                else:
+                    result['folder_reorganize_error'] = reorg_result.get('error')
         
         # Always recalculate review due dates based on current due_date when restarting
         # This handles both new updates and reopened items
