@@ -262,6 +262,7 @@ def update_rfi_tracker_excel(item, action='close'):
         ws = wb.active  # Use the active sheet, or specify by name: wb['SheetName']
         
         # Find headers to determine columns (look in first 10 rows - header may be below legend)
+        # Headers should be short labels, not data cells with long content
         header_row = None
         col_rfi_id = None
         col_title = None
@@ -272,31 +273,56 @@ def update_rfi_tracker_excel(item, action='close'):
         col_link = None
         
         for row_num in range(1, 11):  # Check first 10 rows for headers (may be below legend rows)
+            # Count how many header-like cells we find in this row
+            headers_found = 0
+            row_col_rfi_id = None
+            row_col_title = None
+            row_col_question = None
+            row_col_response = None
+            row_col_status = None
+            row_col_notes = None
+            row_col_link = None
+            
             for col_num in range(1, 20):  # Check first 20 columns
                 cell_value = str(ws.cell(row=row_num, column=col_num).value or '').strip().lower()
-                if 'rfi' in cell_value and ('id' in cell_value or '#' in cell_value or 'number' in cell_value or cell_value == 'rfi'):
-                    col_rfi_id = col_num
-                    header_row = row_num
+                # Skip cells with long content (likely data, not headers)
+                if len(cell_value) > 30:
+                    continue
+                    
+                # Match exact header patterns
+                if cell_value in ('rfi id', 'rfi #', 'rfi#', 'rfi', 'rfi number', 'rfi no', 'rfi no.'):
+                    row_col_rfi_id = col_num
+                    headers_found += 1
                 elif cell_value in ('title', 'name', 'subject', 'description'):
-                    col_title = col_num
-                    if header_row is None:
-                        header_row = row_num
-                elif 'question' in cell_value or 'query' in cell_value:
-                    col_question = col_num
-                    if header_row is None:
-                        header_row = row_num
-                elif 'response' in cell_value or 'answer' in cell_value or 'reply' in cell_value:
-                    col_response = col_num
-                    if header_row is None:
-                        header_row = row_num
-                elif 'status' in cell_value:
-                    col_status = col_num
-                    if header_row is None:
-                        header_row = row_num
-                elif 'notes' in cell_value:
-                    col_notes = col_num
-                elif 'link' in cell_value:
-                    col_link = col_num
+                    row_col_title = col_num
+                    headers_found += 1
+                elif cell_value in ('question', 'query', 'rfi question'):
+                    row_col_question = col_num
+                    headers_found += 1
+                elif cell_value in ('response', 'answer', 'reply', 'rfi response'):
+                    row_col_response = col_num
+                    headers_found += 1
+                elif cell_value == 'status':
+                    row_col_status = col_num
+                    headers_found += 1
+                elif cell_value == 'notes':
+                    row_col_notes = col_num
+                    headers_found += 1
+                elif cell_value in ('link', 'link (if applicable)'):
+                    row_col_link = col_num
+                    headers_found += 1
+            
+            # If we found at least 3 header-like cells in this row, it's likely the header row
+            if headers_found >= 3:
+                header_row = row_num
+                col_rfi_id = row_col_rfi_id
+                col_title = row_col_title
+                col_question = row_col_question
+                col_response = row_col_response
+                col_status = row_col_status
+                col_notes = row_col_notes
+                col_link = row_col_link
+                break
         
         if not header_row:
             # Default to row 6 based on known file structure (rows 1-4 are legend, row 6 is headers)
@@ -373,9 +399,31 @@ def update_rfi_tracker_excel(item, action='close'):
             else:
                 action_msg = 'no existing entry to update'
         
-        # Save the workbook
-        wb.save(excel_path)
-        wb.close()
+        # Save the workbook - retry a few times if file is locked
+        max_retries = 3
+        retry_delay = 2  # seconds
+        save_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                wb.save(excel_path)
+                wb.close()
+                save_error = None
+                break
+            except PermissionError as e:
+                save_error = e
+                if attempt < max_retries - 1:
+                    print(f"[RFI Excel] File locked, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                    import time
+                    time.sleep(retry_delay)
+                else:
+                    try:
+                        wb.close()
+                    except:
+                        pass
+        
+        if save_error:
+            return {'success': False, 'error': 'Excel file is open by another user. Please close it and try again.'}
         
         return {
             'success': True, 
@@ -535,9 +583,31 @@ def update_submittal_tracker_excel(item, reviewers=None, action='close'):
             else:
                 action_msg = 'no existing entry to update'
         
-        # Save the workbook
-        wb.save(excel_path)
-        wb.close()
+        # Save the workbook - retry a few times if file is locked
+        max_retries = 3
+        retry_delay = 2  # seconds
+        save_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                wb.save(excel_path)
+                wb.close()
+                save_error = None
+                break
+            except PermissionError as e:
+                save_error = e
+                if attempt < max_retries - 1:
+                    print(f"[Submittal Excel] File locked, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                    import time
+                    time.sleep(retry_delay)
+                else:
+                    try:
+                        wb.close()
+                    except:
+                        pass
+        
+        if save_error:
+            return {'success': False, 'error': 'Excel file is open by another user. Please close it and try again.'}
         
         return {
             'success': True, 
@@ -3136,24 +3206,65 @@ def parse_rfi_reviewers(body):
     
     return reviewers
 
+def parse_rfi_coReviewers(body):
+    """Extract the list of Co-reviewers from an ACC RFI email.
+    
+    ACC RFI emails have a 'Co-reviewers' field listing additional reviewers.
+    Format: 'Co-reviewers    Name1 (Company1), Name2 (Company2)'
+    
+    Returns a list of co-reviewer names (without company info).
+    """
+    if not body:
+        return []
+    
+    coReviewers = []
+    
+    # Pattern to match "Co-reviewers" field
+    patterns = [
+        r'(?:^|\n)\s*Co-reviewers[:\s\t]+(.+?)(?=\n\s*(?:Watchers|$|\n\n))',
+        r'(?:^|\n)\s*Co-reviewers[:\s\t]+([^\n]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
+        if match:
+            coReviewer_text = match.group(1).strip()
+            # Split by comma and extract names
+            # Format: "Name (Company), Name2 (Company2)"
+            parts = coReviewer_text.split(',')
+            for part in parts:
+                part = part.strip()
+                # Extract just the name (before the parentheses)
+                name_match = re.match(r'([^(]+)', part)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    if name:
+                        coReviewers.append(name)
+            break
+    
+    return coReviewers
+
 def is_user_in_rfi_reviewers(body, user_names):
-    """Check if the current user is listed as a Reviewer in the RFI email.
+    """Check if the current user is listed as a Reviewer or Co-reviewer in the RFI email.
     
     Args:
         body: The email body text
         user_names: List of user name patterns to match (e.g., ['Richard Hammerberg', 'Hammerberg'])
     
     Returns:
-        True if user is found in Reviewers list, False otherwise
+        True if user is found in Reviewers or Co-reviewers list, False otherwise
     """
     if not body or not user_names:
         return False
     
+    # Get both reviewers and co-reviewers
     reviewers = parse_rfi_reviewers(body)
+    coReviewers = parse_rfi_coReviewers(body)
+    all_reviewers = reviewers + coReviewers
     
     for user_name in user_names:
         user_name_lower = user_name.lower()
-        for reviewer in reviewers:
+        for reviewer in all_reviewers:
             if user_name_lower in reviewer.lower():
                 return True
     
@@ -3574,9 +3685,9 @@ def generate_reviewer_form_html(item_id):
         cursor.execute('UPDATE item SET email_token_reviewer = ? WHERE id = ?', (token, item_id))
         conn.commit()
     
-    # Calculate due dates
-    reviewer_due = item['initial_reviewer_due_date'] or 'N/A'
-    qcr_due = item['qcr_due_date'] or 'N/A'
+    # Calculate due dates (formatted for display)
+    reviewer_due = format_date_for_email(item['initial_reviewer_due_date'])
+    qcr_due = format_date_for_email(item['qcr_due_date'])
     
     conn.close()
     
@@ -3834,7 +3945,8 @@ def process_reviewer_response_json(json_path):
         if not token:
             return {'success': False, 'error': 'Missing token'}
         
-        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        # Get reopen_count from form - None if not present (old forms may not have it)
+        response_reopen_count = data.get('reopen_count')
         
         conn = get_db()
         cursor = conn.cursor()
@@ -3973,7 +4085,8 @@ def process_qcr_response_json(json_path):
         if not token:
             return {'success': False, 'error': 'Missing token'}
         
-        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        # Get reopen_count from form - None if not present (old forms may not have it)
+        response_reopen_count = data.get('reopen_count')
         
         conn = get_db()
         cursor = conn.cursor()
@@ -4155,7 +4268,8 @@ def process_multi_reviewer_response_json(json_path):
         response_category = data.get('response_category')
         internal_notes = data.get('internal_notes', '')
         reviewer_name = data.get('reviewer_name', '')
-        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        # Get reopen_count from form - None if not present (old forms may not have it)
+        response_reopen_count = data.get('reopen_count')
         
         if not item_id or not token:
             return {'success': False, 'error': 'Missing item_id or token'}
@@ -4366,7 +4480,8 @@ def process_multi_reviewer_qcr_response_json(json_path):
         item_id = data.get('item_id')
         token = data.get('token')
         qcr_action = data.get('qcr_action')
-        response_reopen_count = data.get('reopen_count', 0)  # From the form
+        # Get reopen_count from form - None if not present (old forms may not have it)
+        response_reopen_count = data.get('reopen_count')
         
         if not item_id or not token:
             return {'success': False, 'error': 'Missing item_id or token'}
@@ -5172,8 +5287,8 @@ def send_single_reviewer_reminder_email(item, role, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{reviewer_due_date or 'N/A'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(reviewer_due_date) if reviewer_due_date else 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td><td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{format_date_for_email(qcr_due_date) if qcr_due_date else 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Project Folder</td><td style="border:1px solid #ddd;">{folder_link_html}</td></tr>
     </table>
@@ -5526,7 +5641,7 @@ def send_multi_reviewer_qcr_reminder_email(item, due_date, reminder_stage):
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Identifier</td><td style="border:1px solid #ddd;">{item['identifier']}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Title</td><td style="border:1px solid #ddd;">{item['title'] or 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Priority</td><td style="border:1px solid #ddd; color:{priority_color}; font-weight:bold;">{item['priority'] or 'Normal'}</td></tr>
-        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{qcr_due_date or 'N/A'}</td></tr>
+        <tr><td style="border:1px solid #ddd; font-weight:bold;">Your Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(qcr_due_date) if qcr_due_date else 'N/A'}</td></tr>
         <tr><td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td><td style="border:1px solid #ddd; color:#c0392b; font-weight:bold;">{format_date_for_email(item['due_date'])}</td></tr>
     </table>
 
@@ -5812,9 +5927,10 @@ class EmailPoller:
                     
                     # Skip internal activity notifications - these are NOT new items
                     # They are notifications when reviewers add responses, items are forwarded, etc.
+                    # BUT allow "was assigned to you" - these are legitimate new item assignments
                     if re.search(
                         r'review response was (edited|added|created|updated)|'
-                        r'was forwarded|was assigned|workflow step|status changed|'
+                        r'was forwarded|was assigned(?! to you)|workflow step|status changed|'
                         r'comment was added|comment was edited|'
                         r'you were mentioned|attachment was added|'
                         r'A new review response',
@@ -5909,9 +6025,10 @@ class EmailPoller:
                         # - Item is forwarded, assigned, etc.
                         # Subject patterns: "A review response was edited for...", "A review response was added for...",
                         #                   "was forwarded", "was assigned", etc.
+                        # Note: "was assigned to you" is a legitimate assignment email and should check for content changes
                         is_internal_activity_email = bool(re.search(
                             r'review response was (edited|added|created|updated)|'
-                            r'was forwarded|was assigned|workflow step|status changed|'
+                            r'was forwarded|was assigned(?! to you)|workflow step|status changed|'
                             r'comment was added|comment was edited|'
                             r'you were mentioned|attachment was added',
                             subject,
@@ -6330,6 +6447,10 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
     
     conn.commit()
     
+    # Format dates for email display
+    reviewer_due_date = format_date_for_email(reviewer_due_date)
+    qcr_due_date = format_date_for_email(qcr_due_date)
+    
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
     
@@ -6470,12 +6591,12 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date}</td>
         </tr>
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td>
         </tr>
 
         <tr>
@@ -6634,12 +6755,12 @@ def send_reviewer_assignment_email(item_id, is_revision=False, qcr_notes=None):
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date}</td>
         </tr>
 
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td>
         </tr>
 
         <tr>
@@ -8839,9 +8960,9 @@ def generate_multi_reviewer_form(item_id, reviewer_record):
     all_reviewers = cursor.fetchall()
     conn.close()
     
-    # Calculate due dates
-    reviewer_due = item['initial_reviewer_due_date'] or 'N/A'
-    qcr_due = item['qcr_due_date'] or 'N/A'
+    # Calculate due dates (formatted for display)
+    reviewer_due = format_date_for_email(item['initial_reviewer_due_date'])
+    qcr_due = format_date_for_email(item['qcr_due_date'])
     
     # Check if this is truly multi-reviewer (more than 1 reviewer)
     is_multi_reviewer = len(all_reviewers) > 1
@@ -9041,6 +9162,10 @@ def send_multi_reviewer_assignment_emails(item_id):
             ''', (calculated['initial_reviewer_due_date'], calculated['qcr_due_date'], item_id))
             conn.commit()
     
+    # Format dates for email display
+    reviewer_due_date = format_date_for_email(reviewer_due_date)
+    qcr_due_date = format_date_for_email(qcr_due_date)
+    
     # Priority color
     priority_color = '#e67e22' if item['priority'] == 'Medium' else '#c0392b' if item['priority'] == 'High' else '#27ae60'
     
@@ -9214,11 +9339,11 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
@@ -9317,11 +9442,11 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Initial Review Due Date</td>
-            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#2980b9; font-weight:bold;">{reviewer_due_date}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
@@ -9435,7 +9560,7 @@ def send_multi_reviewer_assignment_emails(item_id):
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">QCR Due Date</td>
-            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{qcr_due_date or 'N/A'}</td>
+            <td style="border:1px solid #ddd; color:#27ae60; font-weight:bold;">{format_date_for_email(qcr_due_date) if qcr_due_date else 'N/A'}</td>
         </tr>
         <tr>
             <td style="border:1px solid #ddd; font-weight:bold;">Contractor Due Date</td>
@@ -9664,12 +9789,12 @@ def generate_multi_reviewer_qcr_form(item_id):
     html = html.replace('{{ITEM_IDENTIFIER}}', item['identifier'] or '')
     html = html.replace('{{ITEM_TITLE}}', js_escape(item['title']) or 'N/A')
     html = html.replace('{{ITEM_TITLE_HTML}}', html_escape(item['title'] or 'N/A'))
-    html = html.replace('{{DATE_RECEIVED}}', item['date_received'] or 'N/A')
+    html = html.replace('{{DATE_RECEIVED}}', format_date_for_email(item['date_received']))
     html = html.replace('{{PRIORITY}}', item['priority'] or 'Normal')
     html = html.replace('{{QCR_NAME}}', item['qcr_name'] or 'N/A')
     html = html.replace('{{QCR_EMAIL}}', item['qcr_email'] or '')
-    html = html.replace('{{QCR_DUE_DATE}}', item['qcr_due_date'] or 'N/A')
-    html = html.replace('{{CONTRACTOR_DUE_DATE}}', item['due_date'] or 'N/A')
+    html = html.replace('{{QCR_DUE_DATE}}', format_date_for_email(item['qcr_due_date']))
+    html = html.replace('{{CONTRACTOR_DUE_DATE}}', format_date_for_email(item['due_date']))
     html = html.replace('{{FOLDER_PATH}}', js_escape(item['folder_link']))
     html = html.replace('{{FOLDER_PATH_RAW}}', html_escape(item['folder_link'] or ''))
     html = html.replace('{{RFI_QUESTION}}', js_escape(item.get('rfi_question', '') or 'N/A'))
@@ -10899,6 +11024,20 @@ def api_update_item(item_id):
     if qcr_id and int(qcr_id) in initial_reviewer_ids:
         return jsonify({'error': 'Initial Reviewer and QCR must be different users'}), 400
     
+    # Check if bucket is being changed - if so, we need to move the folder
+    old_bucket = None
+    old_folder_link = None
+    if 'bucket' in data:
+        cursor.execute('SELECT bucket, folder_link, type, identifier, title, project_id FROM item WHERE id = ?', (item_id,))
+        current_item = cursor.fetchone()
+        if current_item and current_item['bucket'] != data['bucket']:
+            old_bucket = current_item['bucket']
+            old_folder_link = current_item['folder_link']
+            item_type = current_item['type']
+            identifier = current_item['identifier']
+            title = current_item['title']
+            project_id = current_item['project_id']
+    
     # Check if user is manually setting due dates
     manual_initial_due = 'initial_reviewer_due_date' in data
     manual_qcr_due = 'qcr_due_date' in data
@@ -10961,6 +11100,54 @@ def api_update_item(item_id):
                 1 if due_dates['is_contractor_window_insufficient'] else 0,
                 item_id
             ))
+    
+    # Handle folder move if bucket changed
+    if old_bucket:
+        new_bucket = data['bucket']
+        print(f"[Bucket Change] Detected bucket change from {old_bucket} to {new_bucket} for item {item_id}")
+        print(f"[Bucket Change] Old folder link: {old_folder_link}")
+        
+        # Get project base folder if available
+        base_folder = None
+        if project_id:
+            cursor.execute('SELECT base_folder_path FROM project WHERE id = ?', (project_id,))
+            proj_row = cursor.fetchone()
+            if proj_row and proj_row['base_folder_path']:
+                base_folder = proj_row['base_folder_path']
+        
+        # Calculate new folder path
+        new_folder_link = create_item_folder(item_type, identifier, new_bucket, title, base_folder=base_folder)
+        print(f"[Bucket Change] New folder link: {new_folder_link}")
+        
+        if new_folder_link:
+            try:
+                import shutil
+                # Move all contents from old folder to new folder (if old folder exists)
+                if old_folder_link and os.path.exists(old_folder_link):
+                    for item_name in os.listdir(old_folder_link):
+                        src = os.path.join(old_folder_link, item_name)
+                        dst = os.path.join(new_folder_link, item_name)
+                        if os.path.isdir(src):
+                            if os.path.exists(dst):
+                                shutil.rmtree(dst)
+                            shutil.copytree(src, dst)
+                        else:
+                            shutil.copy2(src, dst)
+                    
+                    # Remove old folder after successful copy
+                    shutil.rmtree(old_folder_link)
+                    print(f"[Bucket Change] Moved folder contents from {old_folder_link} to {new_folder_link}")
+                else:
+                    print(f"[Bucket Change] Old folder does not exist, just updating folder_link")
+                
+                # Update database with new folder link
+                cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (new_folder_link, item_id))
+                print(f"[Bucket Change] Updated folder_link in database to {new_folder_link}")
+            except Exception as e:
+                print(f"[Bucket Change] Error moving folder: {e}")
+                import traceback
+                traceback.print_exc()
+                # Keep the new empty folder, old folder still exists
     
     conn.commit()
     
@@ -11325,7 +11512,7 @@ def api_close_item(item_id):
     reviewers = None
     if updated_item.get('type') == 'Submittal':
         cursor.execute('''
-            SELECT reviewer_name, reviewer_email, responded_at, response_category, response_text
+            SELECT reviewer_name, reviewer_email, response_at, response_category, internal_notes
             FROM item_reviewers WHERE item_id = ?
         ''', (item_id,))
         reviewers = [dict(row) for row in cursor.fetchall()]
@@ -11348,8 +11535,10 @@ def api_close_item(item_id):
     excel_result = update_rfi_tracker_excel(updated_item, action='close')
     if excel_result.get('success'):
         updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
+        print(f"[RFI Close] Excel update success: {excel_result.get('message')}")
     elif excel_result.get('error'):
         updated_item['excel_update_error'] = excel_result.get('error')
+        print(f"[RFI Close] Excel update FAILED: {excel_result.get('error')}")
     
     # Update Submittal Tracker Excel if this is a Submittal
     submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
@@ -13747,7 +13936,35 @@ def api_mark_item_complete(item_id):
     ''', (item_id,))
     
     conn.commit()
+    
+    # Get full item data for Excel update
+    cursor.execute('SELECT * FROM item WHERE id = ?', (item_id,))
+    updated_item = dict(cursor.fetchone())
+    
+    # Get reviewer info for submittals
+    reviewers = None
+    if updated_item.get('type') == 'Submittal':
+        cursor.execute('''
+            SELECT reviewer_name, reviewer_email, response_at, response_category, internal_notes
+            FROM item_reviewers WHERE item_id = ?
+        ''', (item_id,))
+        reviewers = [dict(row) for row in cursor.fetchall()]
+    
     conn.close()
+    
+    # Update RFI Bulletin Tracker Excel if this is an RFI
+    excel_result = update_rfi_tracker_excel(updated_item, action='close')
+    if excel_result.get('success'):
+        print(f"[RFI Complete] Excel update success: {excel_result.get('message')}")
+    elif excel_result.get('error'):
+        print(f"[RFI Complete] Excel update FAILED: {excel_result.get('error')}")
+    
+    # Update Submittal Tracker Excel if this is a Submittal
+    submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
+    if submittal_excel_result.get('success'):
+        print(f"[Submittal Complete] Excel update success: {submittal_excel_result.get('message')}")
+    elif submittal_excel_result.get('error'):
+        print(f"[Submittal Complete] Excel update FAILED: {submittal_excel_result.get('error')}")
     
     return jsonify({'success': True, 'message': 'Item marked as complete'})
 

@@ -465,6 +465,11 @@
                 if (reviewerCategoryRow) {
                     reviewerCategoryRow.style.display = "none";
                 }
+                // Also hide the final response category dropdown for RFIs
+                var categoryGroup = document.getElementById("category-group");
+                if (categoryGroup) {
+                    categoryGroup.style.display = "none";
+                }
             }
             
             // Get original reviewer text from notes
@@ -667,10 +672,13 @@
                     return;
                 }
             } else {
-                var category = document.getElementById("response_category").value;
-                if (!category) {
-                    alert("Please select a final response category.");
-                    return;
+                // Only require response category for Submittals, not RFIs
+                if (!ITEM_CONFIG.is_rfi) {
+                    var category = document.getElementById("response_category").value;
+                    if (!category) {
+                        alert("Please select a final response category.");
+                        return;
+                    }
                 }
             }
             

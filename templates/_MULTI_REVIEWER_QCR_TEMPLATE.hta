@@ -461,6 +461,10 @@
                 if (rfiSection) {
                     rfiSection.style.display = 'block';
                 }
+                // Hide response category for RFIs - they don't use categories
+                var catLabel = document.querySelector('label[for="response_category"]');
+                var catSelect = document.getElementById('response_category');
+                if (catLabel) catLabel.parentElement.style.display = 'none';
             }
             // Load files for potential selection
             loadFolderFiles();
@@ -596,7 +600,8 @@
                 var category = document.getElementById("response_category").value;
                 var responseText = document.getElementById("response_text").value;
                 
-                if (!category) {
+                // Only require response category for Submittals, not RFIs
+                if (!ITEM_CONFIG.is_rfi && !category) {
                     alert("Please select a response category.");
                     return;
                 }

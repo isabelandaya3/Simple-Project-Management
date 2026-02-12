@@ -1897,6 +1897,22 @@ tr.insufficient-warning:hover {
     background: rgba(52, 199, 89, 0.05);
 }
 
+/* Hidden date picker that sits behind the text input */
+.date-picker-hidden {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    padding: 0;
+    border: none;
+    pointer-events: none;
+}
+
+/* Make calculated date inputs clickable */
+.calculated-date-input {
+    cursor: pointer;
+}
+
 /* =========================
    WORKFLOW STYLES
    ========================= */

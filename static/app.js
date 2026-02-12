@@ -903,12 +903,19 @@ async function populateDetailDrawer(item) {
     
     // Calculated due dates - now editable inputs with color coding
     const initialReviewerDue = document.getElementById('detail-initial-reviewer-due');
+    const initialReviewerDuePicker = document.getElementById('detail-initial-reviewer-due-picker');
     const qcrDue = document.getElementById('detail-qcr-due');
+    const qcrDuePicker = document.getElementById('detail-qcr-due-picker');
     
-    initialReviewerDue.value = item.initial_reviewer_due_date || '';
+    // Set formatted display and hidden picker value
+    initialReviewerDue.value = item.initial_reviewer_due_date ? formatDate(item.initial_reviewer_due_date) : '';
+    initialReviewerDue.dataset.rawDate = item.initial_reviewer_due_date || '';
+    initialReviewerDuePicker.value = item.initial_reviewer_due_date || '';
     initialReviewerDue.className = `calculated-date-input ${getDueDateClass(item.initial_reviewer_due_status)}`;
     
-    qcrDue.value = item.qcr_due_date || '';
+    qcrDue.value = item.qcr_due_date ? formatDate(item.qcr_due_date) : '';
+    qcrDue.dataset.rawDate = item.qcr_due_date || '';
+    qcrDuePicker.value = item.qcr_due_date || '';
     qcrDue.className = `calculated-date-input ${getDueDateClass(item.qcr_due_status)}`;
     
     // Clear reviewer error
@@ -1107,8 +1114,8 @@ async function saveItem() {
         status: document.getElementById('detail-status').value,
         bucket: document.getElementById('detail-bucket').value || 'ALL',
         qcr_id: qcrId || null,
-        initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due').value || null,
-        qcr_due_date: document.getElementById('detail-qcr-due').value || null,
+        initial_reviewer_due_date: document.getElementById('detail-initial-reviewer-due-picker').value || null,
+        qcr_due_date: document.getElementById('detail-qcr-due-picker').value || null,
         notes: document.getElementById('detail-notes').value,
         rfi_question: document.getElementById('detail-rfi-question').value
     };
@@ -3340,6 +3347,31 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Send to Reviewer button
     document.getElementById('btn-send-to-reviewer').addEventListener('click', handleSendToReviewer);
+    
+    // Date picker integration for calculated due dates
+    // Initial Reviewer Due Date
+    const initialReviewerDueInput = document.getElementById('detail-initial-reviewer-due');
+    const initialReviewerDuePicker = document.getElementById('detail-initial-reviewer-due-picker');
+    initialReviewerDueInput.addEventListener('click', () => {
+        initialReviewerDuePicker.showPicker();
+    });
+    initialReviewerDuePicker.addEventListener('change', () => {
+        const newValue = initialReviewerDuePicker.value;
+        initialReviewerDueInput.value = newValue ? formatDate(newValue) : '';
+        initialReviewerDueInput.dataset.rawDate = newValue;
+    });
+    
+    // QCR Due Date
+    const qcrDueInput = document.getElementById('detail-qcr-due');
+    const qcrDuePicker = document.getElementById('detail-qcr-due-picker');
+    qcrDueInput.addEventListener('click', () => {
+        qcrDuePicker.showPicker();
+    });
+    qcrDuePicker.addEventListener('change', () => {
+        const newValue = qcrDuePicker.value;
+        qcrDueInput.value = newValue ? formatDate(newValue) : '';
+        qcrDueInput.dataset.rawDate = newValue;
+    });
     
     // Send Reminder button in drawer
     document.getElementById('btn-send-reminder').addEventListener('click', handleSendReminderFromDrawer);
