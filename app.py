@@ -3450,10 +3450,16 @@ def reconcile_item_folder(item_id):
     found_path = find_folder_for_item(item['type'], item['identifier'], item['bucket'])
     
     if found_path:
+        old_path = item['folder_link']
         # Update the database
         cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (found_path, item_id))
         conn.commit()
         conn.close()
+        
+        # Update HTA form files if old path was different
+        if old_path and old_path != found_path:
+            update_hta_folder_paths(found_path, old_path, found_path)
+        
         return {
             'success': True, 
             'message': 'Folder found and updated',
@@ -3505,12 +3511,17 @@ def reconcile_all_folders():
         found_path = find_folder_for_item(item['type'], item['identifier'], item['bucket'])
         
         if found_path:
+            old_path = item['folder_link']
             # Update the database
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute('UPDATE item SET folder_link = ? WHERE id = ?', (found_path, item['id']))
             conn.commit()
             conn.close()
+            
+            # Update HTA form files
+            if old_path != found_path:
+                update_hta_folder_paths(found_path, old_path, found_path)
             
             results['reconciled'].append({
                 'id': item['id'],
@@ -3928,6 +3939,67 @@ def generate_qcr_form_html(item_id):
         return {'success': True, 'path': str(form_path)}
     except Exception as e:
         return {'success': False, 'error': f'Failed to save form: {e}'}
+
+
+def update_hta_folder_paths(folder_path, old_path, new_path):
+    """Update folder paths in all HTA/HTML form files when a folder is moved.
+    
+    This ensures that when an item folder is relocated, the embedded folder_path
+    and responses_folder configurations in the HTA files are updated.
+    """
+    import re
+    
+    folder = Path(folder_path if folder_path else new_path)
+    if not folder.exists():
+        return {'success': False, 'error': 'Folder does not exist'}
+    
+    updated_files = []
+    errors = []
+    
+    # Look in all Responses folders (including versioned ones like "Responses R2")
+    for responses_dir in folder.glob("Responses*"):
+        if not responses_dir.is_dir():
+            continue
+            
+        # Find all HTA and HTML form files
+        for form_file in responses_dir.glob("*.hta"):
+            try:
+                content = form_file.read_text(encoding='utf-8')
+                
+                # Replace old path with new path (handle both escaped and unescaped paths)
+                old_escaped = old_path.replace('\\', '\\\\')
+                new_escaped = new_path.replace('\\', '\\\\')
+                
+                updated_content = content.replace(old_escaped, new_escaped)
+                updated_content = updated_content.replace(old_path, new_path)
+                
+                if updated_content != content:
+                    form_file.write_text(updated_content, encoding='utf-8')
+                    updated_files.append(str(form_file))
+            except Exception as e:
+                errors.append(f'{form_file.name}: {str(e)}')
+        
+        for form_file in responses_dir.glob("*.html"):
+            try:
+                content = form_file.read_text(encoding='utf-8')
+                
+                old_escaped = old_path.replace('\\', '\\\\')
+                new_escaped = new_path.replace('\\', '\\\\')
+                
+                updated_content = content.replace(old_escaped, new_escaped)
+                updated_content = updated_content.replace(old_path, new_path)
+                
+                if updated_content != content:
+                    form_file.write_text(updated_content, encoding='utf-8')
+                    updated_files.append(str(form_file))
+            except Exception as e:
+                errors.append(f'{form_file.name}: {str(e)}')
+    
+    return {
+        'success': True,
+        'updated_files': updated_files,
+        'errors': errors
+    }
 
 
 def process_reviewer_response_json(json_path):
@@ -11137,6 +11209,13 @@ def api_update_item(item_id):
                     # Remove old folder after successful copy
                     shutil.rmtree(old_folder_link)
                     print(f"[Bucket Change] Moved folder contents from {old_folder_link} to {new_folder_link}")
+                    
+                    # Update HTA form files with new folder path
+                    hta_result = update_hta_folder_paths(new_folder_link, old_folder_link, new_folder_link)
+                    if hta_result.get('updated_files'):
+                        print(f"[Bucket Change] Updated HTA form files: {hta_result['updated_files']}")
+                    if hta_result.get('errors'):
+                        print(f"[Bucket Change] HTA update errors: {hta_result['errors']}")
                 else:
                     print(f"[Bucket Change] Old folder does not exist, just updating folder_link")
                 
@@ -14078,11 +14157,18 @@ def api_relocate_item_folder(item_id):
     conn.commit()
     conn.close()
     
+    # Update HTA form files with the new folder path
+    hta_result = {'updated_files': [], 'errors': []}
+    if old_path:
+        hta_result = update_hta_folder_paths(new_path, old_path, new_path)
+    
     return jsonify({
         'success': True,
         'message': 'Folder path updated',
         'old_path': old_path,
-        'new_path': new_path
+        'new_path': new_path,
+        'hta_files_updated': len(hta_result.get('updated_files', [])),
+        'hta_errors': hta_result.get('errors', [])
     })
 
 
