@@ -428,8 +428,9 @@
 
             <!-- Final Response Category (shown only for Approve/Modify) -->
             <div class="form-group" id="category-group" style="display: none;">
-                <label for="response_category">Final Response Category *</label>
-                <select name="response_category" id="response_category">
+                <!-- Response Category: Only show for non-RFI types -->
+                <label for="response_category" id="response-category-label" style="display:none;">Final Response Category *</label>
+                <select name="response_category" id="response_category" style="display:none;">
                     <option value="">-- Select --</option>
                     <option value="Approved">Approved</option>
                     <option value="Approved as Noted">Approved as Noted</option>
@@ -514,6 +515,7 @@
             radio.addEventListener('change', function() {
                 const action = this.value;
                 
+                const isRFI = ITEM_CONFIG.item_type && ITEM_CONFIG.item_type.toUpperCase() === 'RFI';
                 if (action === 'Send Back') {
                     responseModeGroup.style.display = 'none';
                     categoryGroup.style.display = 'none';
@@ -522,18 +524,26 @@
                     notesRequiredHint.style.display = 'inline';
                     qcrNotes.required = true;
                     categorySelect.required = false;
-                    submitBtn.textContent = '↩️ Send Back to Reviewer';
-                    submitBtn.classList.add('send-back');
+                    document.getElementById('response-category-label').style.display = 'none';
+                    categorySelect.style.display = 'none';
                 } else {
                     responseModeGroup.style.display = 'block';
-                    categoryGroup.style.display = 'block';
                     filesGroup.style.display = 'block';
                     sendBackWarning.style.display = 'none';
                     notesRequiredHint.style.display = 'none';
                     qcrNotes.required = false;
-                    categorySelect.required = true;
                     submitBtn.classList.remove('send-back');
-                    
+                    if (isRFI) {
+                        categoryGroup.style.display = 'none';
+                        document.getElementById('response-category-label').style.display = 'none';
+                        categorySelect.style.display = 'none';
+                        categorySelect.required = false;
+                    } else {
+                        categoryGroup.style.display = 'block';
+                        document.getElementById('response-category-label').style.display = 'block';
+                        categorySelect.style.display = 'block';
+                        categorySelect.required = true;
+                    }
                     if (action === 'Approve') {
                         submitBtn.textContent = '✅ Approve & Complete';
                     } else {

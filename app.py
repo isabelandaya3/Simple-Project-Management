@@ -12,7 +12,6 @@ import os
 import re
 import json
 import sqlite3
-import hashlib
 import secrets
 import threading
 import time
@@ -20,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 
-from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template_string
+from flask import Flask, request, jsonify, send_from_directory, session, render_template_string
 import bcrypt
 
 # Optional: dateutil for flexible date parsing
@@ -2800,6 +2799,12 @@ def init_db():
         ''', ('admin@local', password_hash.decode('utf-8'), 'Administrator', 'admin'))
         print(f"Created default admin user: admin@local / {default_password}")
     
+    # Migration: Add excel_synced column for tracking Excel file updates
+    try:
+        cursor.execute('ALTER TABLE item ADD COLUMN excel_synced INTEGER DEFAULT 0')
+    except:
+        pass
+    
     conn.commit()
     conn.close()
 
@@ -4098,7 +4103,9 @@ def process_reviewer_response_json(json_path):
             item_id
         ))
         
+
         # If this response came from item_reviewers, also update that record
+        all_responded = False
         if item_reviewer_id:
             cursor.execute('''
                 UPDATE item_reviewers SET
@@ -4116,26 +4123,40 @@ def process_reviewer_response_json(json_path):
                 item_reviewer_id
             ))
             print(f"  [Watcher] Also updated item_reviewers record {item_reviewer_id}")
-        
+
+            # Check if all reviewers have responded (even if only one)
+            cursor.execute('''
+                SELECT COUNT(*) as total, SUM(CASE WHEN response_at IS NOT NULL THEN 1 ELSE 0 END) as responded
+                FROM item_reviewers
+                WHERE item_id = ?
+            ''', (item_id,))
+            count_result = cursor.fetchone()
+            all_responded = (count_result['total'] > 0 and count_result['total'] == count_result['responded'])
+
+            # If all responded, update item status and trigger QCR email
+            if all_responded:
+                cursor.execute('''
+                    UPDATE item SET status = 'In QC', reviewer_response_status = 'All Responded' WHERE id = ?
+                ''', (item_id,))
+                conn.commit()
+                try:
+                    is_revision = current_version > 1
+                    qcr_result = send_qcr_assignment_email(item_id, is_revision=is_revision, version=current_version)
+                    if qcr_result['success']:
+                        print(f"  [Watcher] QCR email sent for item {item_id}")
+                    else:
+                        print(f"  [Watcher] Failed to send QCR email: {qcr_result.get('error')}")
+                except Exception as e:
+                    print(f"  [Watcher] Error sending QCR email: {e}")
+
         conn.commit()
         conn.close()
-        
+
         # Rename processed file
         processed_path = json_path.parent / f"_reviewer_response_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         json_path.rename(processed_path)
-        
-        # Send QCR assignment email now that reviewer has responded
-        try:
-            is_revision = current_version > 1
-            qcr_result = send_qcr_assignment_email(item_id, is_revision=is_revision, version=current_version)
-            if qcr_result['success']:
-                print(f"  [Watcher] QCR email sent for item {item_id}")
-            else:
-                print(f"  [Watcher] Failed to send QCR email: {qcr_result.get('error')}")
-        except Exception as e:
-            print(f"  [Watcher] Error sending QCR email: {e}")
-        
-        return {'success': True, 'item_id': item_id, 'version': current_version}
+
+        return {'success': True, 'item_id': item_id, 'version': current_version, 'all_responded': all_responded}
         
     except json.JSONDecodeError:
         return {'success': False, 'error': 'Invalid JSON file'}
@@ -4842,6 +4863,85 @@ def scan_folders_for_responses():
     return results
 
 
+def sync_unsynced_items_to_excel():
+    """Find closed items that haven't been synced to Excel and sync them.
+    
+    Called periodically by the background watcher to ensure Excel files
+    stay up-to-date even if the initial update failed (e.g., file locked).
+    
+    Returns:
+        dict with 'synced_count', 'already_synced', 'errors'
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Find all closed items that haven't been synced to Excel yet
+    cursor.execute('''
+        SELECT i.*, 
+               ir.display_name as initial_reviewer_name, 
+               qcr.display_name as qcr_name,
+               qcr.email as qcr_email
+        FROM item i
+        LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+        LEFT JOIN user qcr ON i.qcr_id = qcr.id
+        WHERE i.status = 'Closed' AND (i.excel_synced IS NULL OR i.excel_synced = 0)
+    ''')
+    unsynced_items = [dict(row) for row in cursor.fetchall()]
+    
+    if not unsynced_items:
+        conn.close()
+        return {'synced_count': 0, 'already_synced': 0, 'errors': []}
+    
+    synced_count = 0
+    errors = []
+    
+    for item in unsynced_items:
+        item_id = item['id']
+        try:
+            # Get reviewer info for submittals
+            reviewers = None
+            if item.get('type') == 'Submittal':
+                cursor.execute('''
+                    SELECT reviewer_name, reviewer_email, response_at, response_category, internal_notes
+                    FROM item_reviewers WHERE item_id = ?
+                ''', (item_id,))
+                reviewers = [dict(row) for row in cursor.fetchall()]
+            
+            # Attempt Excel update based on item type
+            success = True
+            if item.get('type') == 'RFI':
+                result = update_rfi_tracker_excel(item, action='close')
+                if not result.get('success'):
+                    success = False
+                    if result.get('error'):
+                        errors.append(f"{item['identifier']}: {result['error']}")
+            
+            if item.get('type') == 'Submittal':
+                result = update_submittal_tracker_excel(item, reviewers=reviewers, action='close')
+                if not result.get('success'):
+                    success = False
+                    if result.get('error'):
+                        errors.append(f"{item['identifier']}: {result['error']}")
+            
+            # Mark as synced if successful
+            if success:
+                cursor.execute('UPDATE item SET excel_synced = 1 WHERE id = ?', (item_id,))
+                conn.commit()
+                synced_count += 1
+                print(f"  [Excel Sync] Synced {item['identifier']} to Excel")
+                
+        except Exception as e:
+            errors.append(f"{item.get('identifier', item_id)}: {str(e)}")
+    
+    conn.close()
+    
+    return {
+        'synced_count': synced_count,
+        'total_unsynced': len(unsynced_items),
+        'errors': errors
+    }
+
+
 class FolderResponseWatcher:
     """Background watcher for JSON response files in item folders."""
     
@@ -4901,6 +5001,18 @@ class FolderResponseWatcher:
                 
                 # Process any pending emails that failed earlier
                 process_pending_emails()
+                
+                # Sync any unsynced closed items to Excel (every 5th scan, ~2.5 min)
+                if self.scan_count % 5 == 0:
+                    try:
+                        sync_result = sync_unsynced_items_to_excel()
+                        if sync_result.get('synced_count', 0) > 0:
+                            print(f"  [Watcher] Excel sync: synced {sync_result['synced_count']} items")
+                        if sync_result.get('errors'):
+                            for err in sync_result['errors']:
+                                print(f"  [Watcher] Excel sync error: {err}")
+                    except Exception as excel_err:
+                        print(f"  [Watcher] Excel sync error: {excel_err}")
                     
             except Exception as e:
                 print(f"  [Watcher] Scan error: {e}")
@@ -9276,10 +9388,20 @@ def send_multi_reviewer_assignment_emails(item_id):
     </div>"""
     
     sent_count = 0
+    skipped_count = 0
+    new_sent_count = 0
     errors = []
     
     for reviewer in reviewers:
         try:
+            # Skip reviewers who already received their email (e.g., partial send retry)
+            if reviewer['email_sent_at']:
+                print(f"    Skipping {reviewer['reviewer_name']} - email already sent at {reviewer['email_sent_at']}")
+                skipped_count += 1
+                sent_count += 1  # Count as sent for status update purposes
+                continue
+
+            
             # Generate token if not exists
             token = reviewer['email_token']
             if not token:
@@ -9567,6 +9689,7 @@ def send_multi_reviewer_assignment_emails(item_id):
                 conn.commit()
                 
                 sent_count += 1
+                new_sent_count += 1
             finally:
                 pythoncom.CoUninitialize()
                 
@@ -9683,13 +9806,14 @@ def send_multi_reviewer_assignment_emails(item_id):
             'sent_count': sent_count,
             'qcr_notified': qcr_email_sent if not is_single_reviewer else True,
             'errors': errors,
-            'message': f'Sent {sent_count} reviewer emails with {len(errors)} errors'
+            'message': f'Sent {new_sent_count} new + {skipped_count} already sent reviewer emails with {len(errors)} errors'
         }
     
+    msg_detail = f'{new_sent_count} new' + (f', {skipped_count} already sent' if skipped_count else '')
     if is_single_reviewer:
-        return {'success': True, 'sent_count': sent_count, 'qcr_notified': True, 'message': f'Sent {sent_count} reviewer email (QCR CC\'d)'}
+        return {'success': True, 'sent_count': sent_count, 'new_sent_count': new_sent_count, 'skipped_count': skipped_count, 'qcr_notified': True, 'message': f'Sent {msg_detail} reviewer email (QCR CC\'d)'}
     else:
-        return {'success': True, 'sent_count': sent_count, 'qcr_notified': qcr_email_sent, 'message': f'Sent {sent_count} reviewer emails + separate QCR notification'}
+        return {'success': True, 'sent_count': sent_count, 'new_sent_count': new_sent_count, 'skipped_count': skipped_count, 'qcr_notified': qcr_email_sent, 'message': f'Sent {msg_detail} reviewer emails + separate QCR notification'}
 
 
 def generate_multi_reviewer_qcr_form(item_id):
@@ -11611,6 +11735,7 @@ def api_close_item(item_id):
     conn.close()
     
     # Update RFI Bulletin Tracker Excel if this is an RFI
+    excel_success = True
     excel_result = update_rfi_tracker_excel(updated_item, action='close')
     if excel_result.get('success'):
         updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
@@ -11618,6 +11743,7 @@ def api_close_item(item_id):
     elif excel_result.get('error'):
         updated_item['excel_update_error'] = excel_result.get('error')
         print(f"[RFI Close] Excel update FAILED: {excel_result.get('error')}")
+        excel_success = False
     
     # Update Submittal Tracker Excel if this is a Submittal
     submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
@@ -11625,6 +11751,14 @@ def api_close_item(item_id):
         updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
     elif submittal_excel_result.get('error'):
         updated_item['excel_update_error'] = submittal_excel_result.get('error')
+        excel_success = False
+    
+    # Mark as synced if Excel update succeeded (background retry will catch failures)
+    if excel_success:
+        sync_conn = get_db()
+        sync_conn.execute('UPDATE item SET excel_synced = 1 WHERE id = ?', (item_id,))
+        sync_conn.commit()
+        sync_conn.close()
     
     return jsonify(updated_item)
 
@@ -11669,6 +11803,12 @@ def api_reopen_item(item_id):
         updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
     elif submittal_excel_result.get('error'):
         updated_item['excel_update_error'] = submittal_excel_result.get('error')
+    
+    # Reset excel_synced since item is reopened
+    reopen_conn = get_db()
+    reopen_conn.execute('UPDATE item SET excel_synced = 0 WHERE id = ?', (item_id,))
+    reopen_conn.commit()
+    reopen_conn.close()
     
     return jsonify(updated_item)
 
@@ -14028,15 +14168,30 @@ def api_mark_item_complete(item_id):
             FROM item_reviewers WHERE item_id = ?
         ''', (item_id,))
         reviewers = [dict(row) for row in cursor.fetchall()]
+        
+        # Get reviewer and QCR names from user table for Excel update
+        cursor.execute('''
+            SELECT ir.display_name as initial_reviewer_name, qcr.display_name as qcr_name
+            FROM item i
+            LEFT JOIN user ir ON i.initial_reviewer_id = ir.id
+            LEFT JOIN user qcr ON i.qcr_id = qcr.id
+            WHERE i.id = ?
+        ''', (item_id,))
+        names_row = cursor.fetchone()
+        if names_row:
+            updated_item['initial_reviewer_name'] = names_row['initial_reviewer_name']
+            updated_item['qcr_name'] = names_row['qcr_name']
     
     conn.close()
     
     # Update RFI Bulletin Tracker Excel if this is an RFI
+    excel_success = True
     excel_result = update_rfi_tracker_excel(updated_item, action='close')
     if excel_result.get('success'):
         print(f"[RFI Complete] Excel update success: {excel_result.get('message')}")
     elif excel_result.get('error'):
         print(f"[RFI Complete] Excel update FAILED: {excel_result.get('error')}")
+        excel_success = False
     
     # Update Submittal Tracker Excel if this is a Submittal
     submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
@@ -14044,8 +14199,33 @@ def api_mark_item_complete(item_id):
         print(f"[Submittal Complete] Excel update success: {submittal_excel_result.get('message')}")
     elif submittal_excel_result.get('error'):
         print(f"[Submittal Complete] Excel update FAILED: {submittal_excel_result.get('error')}")
+        excel_success = False
+    
+    # Mark as synced if Excel update succeeded (background retry will catch failures)
+    if excel_success:
+        sync_conn = get_db()
+        sync_conn.execute('UPDATE item SET excel_synced = 1 WHERE id = ?', (item_id,))
+        sync_conn.commit()
+        sync_conn.close()
     
     return jsonify({'success': True, 'message': 'Item marked as complete'})
+
+
+@app.route('/api/sync-excel', methods=['POST'])
+@admin_required
+def api_sync_excel():
+    """Manually trigger Excel sync for all unsynced closed items."""
+    try:
+        result = sync_unsynced_items_to_excel()
+        return jsonify({
+            'success': True,
+            'synced_count': result.get('synced_count', 0),
+            'total_unsynced': result.get('total_unsynced', 0),
+            'errors': result.get('errors', []),
+            'message': f"Synced {result.get('synced_count', 0)} of {result.get('total_unsynced', 0)} unsynced items to Excel"
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # =============================================================================
 # FILE-BASED FORM API ENDPOINTS
