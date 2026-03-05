@@ -10311,6 +10311,11 @@ def send_multi_reviewer_qcr_email(item_id):
         else:
             print(f"  Warning: Could not generate QCR HTA form: {form_result.get('error')}")
     
+    def html_escape(s):
+        if not s:
+            return ''
+        return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
     # Build reviewer names for display (each on new line)
     reviewer_names_html = "<br>".join([r['reviewer_name'] for r in reviewers])
     
