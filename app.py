@@ -5059,15 +5059,17 @@ def sync_unsynced_items_to_excel():
                 result = update_rfi_tracker_excel(item, action='close')
                 if not result.get('success'):
                     success = False
-                    if result.get('error'):
-                        errors.append(f"{item['identifier']}: {result['error']}")
+                    error_msg = result.get('error', 'Unknown error')
+                    errors.append(f"{item['identifier']}: {error_msg}")
+                    print(f"  [Excel Sync] RFI sync failed for {item['identifier']}: {error_msg}")
             
             if item.get('type') == 'Submittal':
                 result = update_submittal_tracker_excel(item, reviewers=reviewers, action='close')
                 if not result.get('success'):
                     success = False
-                    if result.get('error'):
-                        errors.append(f"{item['identifier']}: {result['error']}")
+                    error_msg = result.get('error', 'Unknown error')
+                    errors.append(f"{item['identifier']}: {error_msg}")
+                    print(f"  [Excel Sync] Submittal sync failed for {item['identifier']}: {error_msg}")
             
             # Mark as synced if successful
             if success:
@@ -5078,6 +5080,7 @@ def sync_unsynced_items_to_excel():
                 
         except Exception as e:
             errors.append(f"{item.get('identifier', item_id)}: {str(e)}")
+            print(f"  [Excel Sync] Exception syncing {item.get('identifier', item_id)}: {e}")
     
     conn.close()
     
@@ -5155,10 +5158,13 @@ class FolderResponseWatcher:
                         if sync_result.get('synced_count', 0) > 0:
                             print(f"  [Watcher] Excel sync: synced {sync_result['synced_count']} items")
                         if sync_result.get('errors'):
+                            # Always log Excel sync errors (don't deduplicate - these need attention)
                             for err in sync_result['errors']:
                                 print(f"  [Watcher] Excel sync error: {err}")
+                        if sync_result.get('total_unsynced', 0) > 0 and sync_result.get('synced_count', 0) == 0:
+                            print(f"  [Watcher] WARNING: {sync_result['total_unsynced']} items still pending Excel sync")
                     except Exception as excel_err:
-                        print(f"  [Watcher] Excel sync error: {excel_err}")
+                        print(f"  [Watcher] Excel sync exception: {excel_err}")
                 
                 # Reconcile folders (every 10th scan, ~5 min) - detects renamed folders
                 # and updates DB + regenerates active response forms automatically
@@ -5317,6 +5323,22 @@ def check_response_exists_local(item_id, role, reviewer_name=None):
     
     return False
 
+def next_business_day(d):
+    """Return the next business day after date d (skips weekends)."""
+    next_day = d + timedelta(days=1)
+    # Saturday (5) -> Monday, Sunday (6) -> Monday
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day
+
+def is_overdue_reminder_day(due_date, today):
+    """Check if today is the first business day after the due date (weekend-aware).
+    
+    e.g. due Friday Feb 27 -> overdue reminder on Monday Mar 2
+         due Thursday Feb 26 -> overdue reminder on Friday Feb 27
+    """
+    return today == next_business_day(due_date)
+
 def get_items_needing_reminders():
     """Get all items that need reminder emails today.
     
@@ -5364,11 +5386,11 @@ def get_items_needing_reminders():
         if due_date == today:
             reminder_stage = 'due_today'
         elif due_date < today:
-            # Only send overdue reminder on the day after (not every day after)
-            if due_date == yesterday:
+            # Send overdue reminder on the first business day after due date (skips weekends)
+            if is_overdue_reminder_day(due_date, today):
                 reminder_stage = 'overdue'
             else:
-                continue  # Don't send reminders for items overdue by more than 1 day
+                continue  # Not the first business day after due date
         else:
             continue  # Future due date
         
@@ -5422,9 +5444,9 @@ def get_items_needing_reminders():
             reminder_stage = 'due_today'
         elif due_date < today:
             # Send overdue reminder if:
-            # 1. Due date was yesterday (normal case), OR
+            # 1. First business day after due date (skips weekends), OR
             # 2. Due date passed but assignment was sent yesterday (late assignment case)
-            if due_date == yesterday:
+            if is_overdue_reminder_day(due_date, today):
                 reminder_stage = 'overdue'
             elif qcr_email_sent_date == yesterday:
                 # Assignment was sent yesterday for an already-overdue item
@@ -5465,7 +5487,8 @@ def get_items_needing_reminders():
         if due_date == today:
             reminder_stage = 'due_today'
         elif due_date < today:
-            if due_date == yesterday:
+            # Send overdue reminder on the first business day after due date (skips weekends)
+            if is_overdue_reminder_day(due_date, today):
                 reminder_stage = 'overdue'
             else:
                 continue
@@ -5518,9 +5541,9 @@ def get_items_needing_reminders():
             reminder_stage = 'due_today'
         elif due_date < today:
             # Send overdue reminder if:
-            # 1. Due date was yesterday (normal case), OR
+            # 1. First business day after due date (skips weekends), OR
             # 2. Due date passed but assignment was sent yesterday (late assignment case)
-            if due_date == yesterday:
+            if is_overdue_reminder_day(due_date, today):
                 reminder_stage = 'overdue'
             elif qcr_email_sent_date == yesterday:
                 # Assignment was sent yesterday for an already-overdue item
@@ -11941,23 +11964,31 @@ def api_close_item(item_id):
     
     conn.close()
     
-    # Update RFI Bulletin Tracker Excel if this is an RFI
+    # Update Excel trackers (wrapped in try/except so close still succeeds)
     excel_success = True
-    excel_result = update_rfi_tracker_excel(updated_item, action='close')
-    if excel_result.get('success'):
-        updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
-        print(f"[RFI Close] Excel update success: {excel_result.get('message')}")
-    elif excel_result.get('error'):
-        updated_item['excel_update_error'] = excel_result.get('error')
-        print(f"[RFI Close] Excel update FAILED: {excel_result.get('error')}")
-        excel_success = False
-    
-    # Update Submittal Tracker Excel if this is a Submittal
-    submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
-    if submittal_excel_result.get('success'):
-        updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
-    elif submittal_excel_result.get('error'):
-        updated_item['excel_update_error'] = submittal_excel_result.get('error')
+    try:
+        # Update RFI Bulletin Tracker Excel if this is an RFI
+        excel_result = update_rfi_tracker_excel(updated_item, action='close')
+        if excel_result.get('success'):
+            updated_item['excel_update'] = excel_result.get('message', 'Excel updated')
+            print(f"[RFI Close] Excel update success: {excel_result.get('message')}")
+        elif excel_result.get('error'):
+            updated_item['excel_update_error'] = excel_result.get('error')
+            print(f"[RFI Close] Excel update FAILED: {excel_result.get('error')}")
+            excel_success = False
+        
+        # Update Submittal Tracker Excel if this is a Submittal
+        submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
+        if submittal_excel_result.get('success'):
+            updated_item['excel_update'] = submittal_excel_result.get('message', 'Excel updated')
+            print(f"[Submittal Close] Excel update success: {submittal_excel_result.get('message')}")
+        elif submittal_excel_result.get('error'):
+            updated_item['excel_update_error'] = submittal_excel_result.get('error')
+            print(f"[Submittal Close] Excel update FAILED: {submittal_excel_result.get('error')}")
+            excel_success = False
+    except Exception as excel_err:
+        print(f"[Close] Excel update exception: {excel_err}")
+        updated_item['excel_update_error'] = str(excel_err)
         excel_success = False
     
     # Mark as synced if Excel update succeeded (background retry will catch failures)
@@ -11966,6 +11997,8 @@ def api_close_item(item_id):
         sync_conn.execute('UPDATE item SET excel_synced = 1 WHERE id = ?', (item_id,))
         sync_conn.commit()
         sync_conn.close()
+    else:
+        print(f"[Close] Excel sync deferred for item {item_id} - background watcher will retry")
     
     return jsonify(updated_item)
 
@@ -14410,21 +14443,26 @@ def api_mark_item_complete(item_id):
     
     conn.close()
     
-    # Update RFI Bulletin Tracker Excel if this is an RFI
+    # Update Excel trackers (wrapped in try/except so complete still succeeds)
     excel_success = True
-    excel_result = update_rfi_tracker_excel(updated_item, action='close')
-    if excel_result.get('success'):
-        print(f"[RFI Complete] Excel update success: {excel_result.get('message')}")
-    elif excel_result.get('error'):
-        print(f"[RFI Complete] Excel update FAILED: {excel_result.get('error')}")
-        excel_success = False
-    
-    # Update Submittal Tracker Excel if this is a Submittal
-    submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
-    if submittal_excel_result.get('success'):
-        print(f"[Submittal Complete] Excel update success: {submittal_excel_result.get('message')}")
-    elif submittal_excel_result.get('error'):
-        print(f"[Submittal Complete] Excel update FAILED: {submittal_excel_result.get('error')}")
+    try:
+        # Update RFI Bulletin Tracker Excel if this is an RFI
+        excel_result = update_rfi_tracker_excel(updated_item, action='close')
+        if excel_result.get('success'):
+            print(f"[RFI Complete] Excel update success: {excel_result.get('message')}")
+        elif excel_result.get('error'):
+            print(f"[RFI Complete] Excel update FAILED: {excel_result.get('error')}")
+            excel_success = False
+        
+        # Update Submittal Tracker Excel if this is a Submittal
+        submittal_excel_result = update_submittal_tracker_excel(updated_item, reviewers=reviewers, action='close')
+        if submittal_excel_result.get('success'):
+            print(f"[Submittal Complete] Excel update success: {submittal_excel_result.get('message')}")
+        elif submittal_excel_result.get('error'):
+            print(f"[Submittal Complete] Excel update FAILED: {submittal_excel_result.get('error')}")
+            excel_success = False
+    except Exception as excel_err:
+        print(f"[Complete] Excel update exception: {excel_err}")
         excel_success = False
     
     # Mark as synced if Excel update succeeded (background retry will catch failures)
@@ -14433,6 +14471,8 @@ def api_mark_item_complete(item_id):
         sync_conn.execute('UPDATE item SET excel_synced = 1 WHERE id = ?', (item_id,))
         sync_conn.commit()
         sync_conn.close()
+    else:
+        print(f"[Complete] Excel sync deferred for item {item_id} - background watcher will retry")
     
     return jsonify({'success': True, 'message': 'Item marked as complete'})
 
